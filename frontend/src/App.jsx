@@ -1,18 +1,23 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { SocketProvider } from "./context/SocketContext";
-import Home from "./page/home.jsx";
-import Call from "./page/call.jsx";
+import { BrowserRouter, Routes, Route, useSearchParams } from 'react-router-dom';
+import Home from './page/home';
+import Call from './page/call';
+
+function Root() {
+  const [searchParams] = useSearchParams();
+  const roomId = searchParams.get('roomId');
+  if (roomId) {
+    return <Call />;
+  }
+  return <Home />;
+}
 
 function App() {
   return (
-    <SocketProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/call/:roomCode" element={<Call />} />
-        </Routes>
-      </BrowserRouter>
-    </SocketProvider>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Root />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 

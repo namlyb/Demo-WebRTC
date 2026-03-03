@@ -1,26 +1,78 @@
+import Room from "../models/Room.js";
+import RandomNameService from "../services/RandomName.js";
+
 const initSocket = (io) => {
   io.on("connection", (socket) => {
-    console.log("🔌 User connected:", socket.id);
 
-    socket.on("join-room", (roomId) => {
-      socket.join(roomId);
-      console.log(`User ${socket.id} joined room ${roomId}`);
+    socket.on("join-room", async ({ roomCode }) => {
+      const displayName = RandomNameService.generate();
+      socket.data.roomCode = roomCode;
+      socket.data.displayName = displayName;
+
+      socket.join(roomCode);
+
+      const clients = [...io.sockets.adapter.rooms.get(roomCode) || []];
+
+      const users = clients
+        .filter(id => id !== socket.id)
+        .map(id => {
+          const s = io.sockets.sockets.get(id);
+          return {
+            id,
+            name: s?.data?.displayName || "Guest"
+          };
+        });
+
+      socket.emit("all-users", users);
+
+      socket.to(roomCode).emit("user-joined", {
+        id: socket.id,
+        name: displayName
+      });
     });
 
-    socket.on("offer", ({ roomId, offer }) => {
-      socket.to(roomId).emit("offer", offer);
+    socket.on("leave-room", async ({ roomCode }) => {
+      if (roomCode && socket.data.roomCode === roomCode) {
+        socket.leave(roomCode);
+        socket.to(roomCode).emit("user-left", socket.id);
+
+        try {
+          await Room.decrementParticipants(roomCode);
+        } catch (err) {
+          console.error("Lỗi giảm participants khi leave:", err);
+        }
+
+        socket.data.roomCode = null;
+      }
     });
 
-    socket.on("answer", ({ roomId, answer }) => {
-      socket.to(roomId).emit("answer", answer);
+    socket.on("offer", ({ target, offer }) => {
+      io.to(target).emit("offer", { sender: socket.id, offer });
     });
 
-    socket.on("ice-candidate", ({ roomId, candidate }) => {
-      socket.to(roomId).emit("ice-candidate", candidate);
+    socket.on("answer", ({ target, answer }) => {
+      io.to(target).emit("answer", { sender: socket.id, answer });
     });
 
-    socket.on("disconnect", () => {
-      console.log("❌ User disconnected:", socket.id);
+    socket.on("ice-candidate", ({ target, candidate }) => {
+      io.to(target).emit("ice-candidate", { sender: socket.id, candidate });
+    });
+
+    socket.on("disconnecting", () => {
+      socket.rooms.forEach(room => {
+        socket.to(room).emit("user-left", socket.id);
+      });
+    });
+
+    socket.on("disconnect", async () => {
+      const roomCode = socket.data.roomCode;
+      if (roomCode) {
+        try {
+          await Room.decrementParticipants(roomCode);
+        } catch (err) {
+          console.error("Lỗi giảm participants khi disconnect:", err);
+        }
+      }
     });
   });
 };

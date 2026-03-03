@@ -19,11 +19,20 @@ app.use("/api/rooms", roomRoutes);
 
 const server = http.createServer(app);
 
+app.use(cors({
+  origin: 'http://localhost:5173',
+  credentials: true
+}));
+
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: {
+    origin: 'http://localhost:5173',
+    methods: ['GET', 'POST']
+  }
 });
 
 initSocket(io);
+
 
 const PORT = 5000;
 server.listen(PORT, () => {

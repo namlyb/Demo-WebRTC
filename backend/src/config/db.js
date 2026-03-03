@@ -23,6 +23,12 @@ export const connectDB = async () => {
     connection.release();
   } catch (err) {
     console.error("❌ MySQL connection failed:", err);
+    console.log('DB Config:', {
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  database: process.env.DB_NAME
+});
     process.exit(1);
   }
 };
+

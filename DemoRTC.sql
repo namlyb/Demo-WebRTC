@@ -10,7 +10,7 @@ CREATE TABLE rooms (
         NOT NULL DEFAULT 'ACTIVE',
 
     max_participants INT NOT NULL DEFAULT 10,
-
+    current_participants INT NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at DATETIME NULL,
     expired_at DATETIME NULL,
