@@ -5,7 +5,7 @@ class RandomNameService {
     try {
       return pokemon.random("en");
     } catch (err) {
-      return "Guest";
+      return pokemon.random("en");
     }
   }
 }

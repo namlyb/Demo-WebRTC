@@ -1,143 +1,276 @@
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { CallProvider, useCall } from "../context/CallContext";
-import { useRef, useEffect } from "react";
-import { 
-  FaMicrophone, 
-  FaMicrophoneSlash, 
-  FaVideo, 
-  FaVideoSlash, 
-  FaDesktop, 
-  FaStop, 
-  FaSignOutAlt 
-} from 'react-icons/fa';
+import { useRef, useEffect, useState } from "react";
+import {
+  FaMicrophone,
+  FaMicrophoneSlash,
+  FaVideo,
+  FaVideoSlash,
+  FaDesktop,
+  FaStop,
+  FaSignOutAlt,
+} from "react-icons/fa";
 
-function Video({ stream, muted = false }) {
-  const ref = useRef();
+// Component dùng chung cho mỗi ô video
+function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameChange }) {
+  const videoRef = useRef();
+  const [editing, setEditing] = useState(false);
+  const [newName, setNewName] = useState(name);
+  const inputRef = useRef();
+
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
   }, [stream]);
-  return <video ref={ref} autoPlay playsInline muted={muted} className="w-full h-full object-cover rounded-lg" />;
+
+  const handleNameClick = () => {
+    if (isLocal) {
+      setEditing(true);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
+  };
+
+  const handleNameSubmit = () => {
+    if (newName.trim() && onNameChange) {
+      onNameChange(newName);
+    }
+    setEditing(false);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") handleNameSubmit();
+    if (e.key === "Escape") setEditing(false);
+  };
+
+  // Kiểm tra video có đang bật không
+  // Local: dựa vào track thực tế; Remote: dựa vào props videoEnabled
+  const hasVideo = isLocal
+    ? stream && stream.getVideoTracks().some(track => track.enabled)
+    : videoEnabled;
+
+  return (
+    <div className="relative w-full h-full bg-gray-800 rounded-lg overflow-hidden">
+      {stream && hasVideo ? (
+        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover" />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-gray-700 text-white">
+          <span className="text-lg font-semibold">{name || "Guest"}</span>
+        </div>
+      )}
+
+      {/* Tên hiển thị ở góc dưới bên trái */}
+      <div className="absolute bottom-2 left-2 bg-black/50 text-white px-2 py-1 rounded text-sm">
+        {editing ? (
+          <input
+            ref={inputRef}
+            type="text"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onBlur={handleNameSubmit}
+            onKeyDown={handleKeyDown}
+            className="bg-transparent border-b border-white outline-none text-white w-24"
+          />
+        ) : (
+          <span onClick={handleNameClick} className="cursor-pointer">
+            {name || "Guest"}
+          </span>
+        )}
+      </div>
+
+      {/* Trạng thái mic/camera cho peer */}
+      {!isLocal && (
+        <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded">
+          {audioEnabled ? (
+            <FaMicrophone className="text-white" size={14} />
+          ) : (
+            <FaMicrophoneSlash className="text-red-500" size={14} />
+          )}
+          {videoEnabled ? (
+            <FaVideo className="text-white" size={14} />
+          ) : (
+            <FaVideoSlash className="text-red-500" size={14} />
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CallUI() {
   const navigate = useNavigate();
   const {
-    participants,
-    loading,
+    peers,
     localStream,
-    remoteStreams,
-    localVideoRef,
-    leaveRoom,
-    mediaError,
-    audioEnabled,
-    videoEnabled,
-    screenSharing,
+    screenStream,
     toggleAudio,
     toggleVideo,
     toggleScreenShare,
+    leaveRoom,
+    audioEnabled,
+    videoEnabled,
+    screenSharing,
+    myName,
+    changeName,
   } = useCall();
 
-  const handleLeaveRoom = () => {
-    leaveRoom();
-    navigate('/');
-  };
+  const totalCols = 6;
+  const totalRows = 4;
+  const localCol = 1;
+  const localRow = 4;
+  const localIndex = (localRow - 1) * totalCols + (localCol - 1); // 18
 
-  if (loading) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-900 text-white">
-        Đang kết nối...
-      </div>
-    );
+  // Danh sách các nguồn video
+  const videoSources = [
+    { type: "local", id: "local", stream: localStream, name: myName, audioEnabled, videoEnabled },
+    ...(screenSharing && screenStream ? [{ type: "screen", id: "screen", stream: screenStream, name: "Screen Share", audioEnabled: false, videoEnabled: true }] : []),
+    ...peers.map(p => ({ 
+      type: "peer", 
+      id: p.id, 
+      stream: p.peer?.streams[0], 
+      name: p.name, 
+      audioEnabled: p.audioEnabled, 
+      videoEnabled: p.videoEnabled 
+    }))
+  ];
+
+  // Vùng trung tâm ưu tiên: cột 2-5, hàng 2-3 (8 ô)
+  const centerCells = [];
+  for (let r = 2; r <= 3; r++) {
+    for (let c = 2; c <= 5; c++) {
+      centerCells.push((r - 1) * totalCols + (c - 1));
+    }
   }
 
-  if (mediaError) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-900 text-white flex-col">
-        <p className="mb-4">Không thể truy cập camera/mic: {mediaError}</p>
-        <p>Vui lòng kiểm tra quyền truy cập và tải lại trang.</p>
-        <button
-          onClick={() => window.location.reload()}
-          className="bg-blue-600 text-white px-4 py-2 rounded mt-4"
-        >
-          Tải lại
-        </button>
-      </div>
-    );
+  // Các ô còn lại (trừ ô local)
+  const allOtherCells = [];
+  for (let i = 0; i < totalCols * totalRows; i++) {
+    const row = Math.floor(i / totalCols) + 1;
+    const col = (i % totalCols) + 1;
+    if (row === localRow && col === localCol) continue;
+    allOtherCells.push(i);
   }
 
-  const totalVideos = 1 + Object.keys(remoteStreams).length;
+  // Gán vị trí: local cố định, các nguồn khác lần lượt vào center rồi other
+  const positions = new Map();
+  videoSources.forEach((src, idx) => {
+    if (src.type === "local") {
+      positions.set(src.id, localIndex);
+    } else {
+      const peerIdx = idx - 1; // bỏ qua local
+      if (peerIdx < centerCells.length) {
+        positions.set(src.id, centerCells[peerIdx]);
+      } else {
+        const otherIdx = peerIdx - centerCells.length;
+        if (otherIdx < allOtherCells.length) {
+          positions.set(src.id, allOtherCells[otherIdx]);
+        }
+      }
+    }
+  });
 
   return (
-    <div className="fixed inset-0 bg-gray-900 flex flex-col">
-      {/* Video grid */}
-      <div className="flex-1 p-4 overflow-auto">
-        <div className={`grid gap-4 h-full ${totalVideos === 1 ? 'grid-cols-1' : 'grid-cols-2 md:grid-cols-3'}`}>
-          {/* Local video */}
-          <div className="relative bg-gray-800 rounded-lg overflow-hidden">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
-            <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
-              Bạn {!videoEnabled && "(tắt camera)"}
-            </div>
-          </div>
+    <div className="fixed inset-0 bg-gray-900">
+      <div className="h-full p-4">
+        <div className="grid grid-cols-6 grid-rows-4 gap-4 h-full">
+          {videoSources.map((src) => {
+            const cellIndex = positions.get(src.id);
+            if (cellIndex === undefined) return null;
 
-          {/* Remote videos */}
-          {Object.entries(remoteStreams).map(([id, stream]) => {
-            const participant = participants.find((p) => p.id === id);
-            return (
-              <div key={id} className="relative bg-gray-800 rounded-lg overflow-hidden">
-                <Video stream={stream} />
-                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
-                  {participant?.name || "Guest"}
+            const row = Math.floor(cellIndex / totalCols) + 1;
+            const col = (cellIndex % totalCols) + 1;
+
+            // Local camera
+            if (src.type === "local") {
+              return (
+                <div
+                  key={src.id}
+                  className="relative bg-gray-800 rounded-lg overflow-hidden"
+                  style={{ gridColumn: col, gridRow: row }}
+                >
+                  <VideoTile
+                    stream={localStream}
+                    name={myName}
+                    isLocal
+                    audioEnabled={audioEnabled}
+                    videoEnabled={videoEnabled}
+                    onNameChange={changeName}
+                  />
+                  {/* Overlay các nút điều khiển */}
+                  <div className="absolute top-2 right-2 flex gap-2">
+                    <button
+                      onClick={toggleAudio}
+                      className={`p-2 rounded-full ${audioEnabled ? "bg-gray-600" : "bg-red-600"} text-white hover:opacity-80 transition`}
+                      title={audioEnabled ? "Tắt mic" : "Bật mic"}
+                    >
+                      {audioEnabled ? <FaMicrophone size={16} /> : <FaMicrophoneSlash size={16} />}
+                    </button>
+                    <button
+                      onClick={toggleVideo}
+                      className={`p-2 rounded-full ${videoEnabled ? "bg-gray-600" : "bg-red-600"} text-white hover:opacity-80 transition`}
+                      title={videoEnabled ? "Tắt camera" : "Bật camera"}
+                    >
+                      {videoEnabled ? <FaVideo size={16} /> : <FaVideoSlash size={16} />}
+                    </button>
+                    <button
+                      onClick={toggleScreenShare}
+                      className={`p-2 rounded-full ${screenSharing ? "bg-green-600" : "bg-gray-600"} text-white hover:opacity-80 transition`}
+                      title={screenSharing ? "Dừng chia sẻ" : "Chia sẻ màn hình"}
+                    >
+                      {screenSharing ? <FaStop size={16} /> : <FaDesktop size={16} />}
+                    </button>
+                    <button
+                      onClick={() => {
+                        leaveRoom();
+                        navigate("/");
+                      }}
+                      className="p-2 rounded-full bg-red-600 text-white hover:opacity-80 transition"
+                      title="Rời phòng"
+                    >
+                      <FaSignOutAlt size={16} />
+                    </button>
+                  </div>
                 </div>
+              );
+            }
+
+            // Screen share
+            if (src.type === "screen") {
+              return (
+                <div
+                  key={src.id}
+                  className="relative bg-gray-800 rounded-lg overflow-hidden"
+                  style={{ gridColumn: col, gridRow: row }}
+                >
+                  <VideoTile
+                    stream={screenStream}
+                    name="Screen Share"
+                    isLocal={false}
+                    audioEnabled={false}
+                    videoEnabled={true}
+                  />
+                </div>
+              );
+            }
+
+            // Peer
+            return (
+              <div
+                key={src.id}
+                className="relative bg-gray-800 rounded-lg overflow-hidden"
+                style={{ gridColumn: col, gridRow: row }}
+              >
+                <VideoTile
+                  stream={src.stream}
+                  name={src.name}
+                  isLocal={false}
+                  audioEnabled={src.audioEnabled}
+                  videoEnabled={src.videoEnabled}
+                />
               </div>
             );
           })}
         </div>
-      </div>
-
-      {/* Control bar */}
-      <div className="bg-gray-800 py-4 flex justify-center items-center gap-4">
-        <button
-          onClick={toggleAudio}
-          className={`flex flex-col items-center p-2 rounded-lg ${audioEnabled ? 'bg-gray-600 hover:bg-gray-500' : 'bg-red-600 hover:bg-red-500'} text-white transition w-20`}
-          title={audioEnabled ? "Tắt mic" : "Bật mic"}
-        >
-          {audioEnabled ? <FaMicrophone size={24} /> : <FaMicrophoneSlash size={24} />}
-          <span className="text-xs mt-1">{audioEnabled ? 'Mic' : 'Tắt mic'}</span>
-        </button>
-
-        <button
-          onClick={toggleVideo}
-          className={`flex flex-col items-center p-2 rounded-lg ${videoEnabled ? 'bg-gray-600 hover:bg-gray-500' : 'bg-red-600 hover:bg-red-500'} text-white transition w-20`}
-          title={videoEnabled ? "Tắt camera" : "Bật camera"}
-        >
-          {videoEnabled ? <FaVideo size={24} /> : <FaVideoSlash size={24} />}
-          <span className="text-xs mt-1">{videoEnabled ? 'Camera' : 'Tắt cam'}</span>
-        </button>
-
-        <button
-          onClick={toggleScreenShare}
-          className={`flex flex-col items-center p-2 rounded-lg ${screenSharing ? 'bg-green-600 hover:bg-green-500' : 'bg-gray-600 hover:bg-gray-500'} text-white transition w-20`}
-          title={screenSharing ? "Dừng chia sẻ màn hình" : "Chia sẻ màn hình"}
-        >
-          {screenSharing ? <FaStop size={24} /> : <FaDesktop size={24} />}
-          <span className="text-xs mt-1">{screenSharing ? 'Dừng share' : 'Share'}</span>
-        </button>
-
-        <button
-          onClick={handleLeaveRoom}
-          className="flex flex-col items-center p-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition w-20"
-          title="Rời phòng"
-        >
-          <FaSignOutAlt size={24} />
-          <span className="text-xs mt-1">Rời phòng</span>
-        </button>
       </div>
     </div>
   );
@@ -146,6 +279,7 @@ function CallUI() {
 export default function Call() {
   const [searchParams] = useSearchParams();
   const roomId = searchParams.get("roomId");
+
   return (
     <CallProvider roomId={roomId}>
       <CallUI />

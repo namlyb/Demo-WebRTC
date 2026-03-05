@@ -1,36 +1,30 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import io from 'socket.io-client';
+import { createContext,useContext,useEffect,useState } from "react";
+import { io } from "socket.io-client";
 
 const SocketContext = createContext();
 
-export const useSocket = () => {
-  const context = useContext(SocketContext);
-  if (!context) {
-    throw new Error('useSocket must be used within a SocketProvider');
-  }
-  return context;
-};
+export const useSocket = ()=>useContext(SocketContext);
 
-export const SocketProvider = ({ children }) => {
-  const [socket, setSocket] = useState(null);
+export const SocketProvider = ({children})=>{
 
-  useEffect(() => {
-    // Kết nối tới server backend (cổng 5000)
-    const newSocket = io('http://localhost:5000');
-    setSocket(newSocket);
+  const [socket,setSocket] = useState(null);
 
-    newSocket.on('connect', () => {
-      console.log('Socket connected:', newSocket.id);
+  useEffect(()=>{
+
+    const s = io("http://localhost:5000",{
+      transports:["websocket"]
     });
 
-    return () => {
-      newSocket.close();
-    };
-  }, []);
+    setSocket(s);
 
-  return (
-    <SocketContext.Provider value={{ socket }}>
+    return ()=>s.disconnect();
+
+  },[]);
+
+  return(
+    <SocketContext.Provider value={socket}>
       {children}
     </SocketContext.Provider>
-  );
-};
+  )
+
+}
