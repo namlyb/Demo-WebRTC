@@ -11,18 +11,25 @@ import {
   FaSignOutAlt,
 } from "react-icons/fa";
 
-// Component dùng chung cho mỗi ô video
-function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameChange }) {
+function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameChange, localStream }) {
   const videoRef = useRef();
   const [editing, setEditing] = useState(false);
   const [newName, setNewName] = useState(name);
   const inputRef = useRef();
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
+    if (videoRef.current) {
+      if (stream) {
+        if (!isLocal && stream === localStream) {
+          console.error("Remote tile received local stream!");
+          return;
+        }
+        videoRef.current.srcObject = stream;
+      } else {
+        videoRef.current.srcObject = null;
+      }
     }
-  }, [stream]);
+  }, [stream, isLocal, localStream]);
 
   const handleNameClick = () => {
     if (isLocal) {
@@ -43,8 +50,6 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
     if (e.key === "Escape") setEditing(false);
   };
 
-  // Kiểm tra video có đang bật không
-  // Local: dựa vào track thực tế; Remote: dựa vào props videoEnabled
   const hasVideo = isLocal
     ? stream && stream.getVideoTracks().some(track => track.enabled)
     : videoEnabled;
@@ -78,19 +83,24 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
         )}
       </div>
 
-      {/* Trạng thái mic/camera cho peer */}
-      {!isLocal && (
-        <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded">
-          {audioEnabled ? (
-            <FaMicrophone className="text-white" size={14} />
-          ) : (
-            <FaMicrophoneSlash className="text-red-500" size={14} />
-          )}
-          {videoEnabled ? (
-            <FaVideo className="text-white" size={14} />
-          ) : (
-            <FaVideoSlash className="text-red-500" size={14} />
-          )}
+      {/* Trạng thái mic/camera cho tất cả (local và remote) */}
+      <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded">
+        {audioEnabled ? (
+          <FaMicrophone className="text-white" size={14} />
+        ) : (
+          <FaMicrophoneSlash className="text-red-500" size={14} />
+        )}
+        {videoEnabled ? (
+          <FaVideo className="text-white" size={14} />
+        ) : (
+          <FaVideoSlash className="text-red-500" size={14} />
+        )}
+      </div>
+
+      {/* Các nút điều khiển chỉ hiện cho local */}
+      {isLocal && (
+        <div className="absolute top-2 left-2 flex gap-2">
+          {/* Các nút điều khiển được render bên ngoài component này từ CallUI */}
         </div>
       )}
     </div>
@@ -114,57 +124,64 @@ function CallUI() {
     changeName,
   } = useCall();
 
-  const totalCols = 6;
-  const totalRows = 4;
+  // Responsive: xác định số cột và số hàng dựa trên kích thước màn hình
+  const [cols, setCols] = useState(6); // desktop
+  const [rows, setRows] = useState(4); // desktop: 6x4 = 24 ô
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 768) {
+        setCols(2);
+        setRows(5); // mobile: 2x5 = 10 ô
+      } else {
+        setCols(6);
+        setRows(4);
+      }
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Vị trí local luôn ở góc dưới bên trái (hàng cuối, cột 1)
+  const localRow = rows;
   const localCol = 1;
-  const localRow = 4;
-  const localIndex = (localRow - 1) * totalCols + (localCol - 1); // 18
+  const localIndex = (localRow - 1) * cols + (localCol - 1);
 
   // Danh sách các nguồn video
   const videoSources = [
     { type: "local", id: "local", stream: localStream, name: myName, audioEnabled, videoEnabled },
     ...(screenSharing && screenStream ? [{ type: "screen", id: "screen", stream: screenStream, name: "Screen Share", audioEnabled: false, videoEnabled: true }] : []),
-    ...peers.map(p => ({ 
-      type: "peer", 
-      id: p.id, 
-      stream: p.peer?.streams[0], 
-      name: p.name, 
-      audioEnabled: p.audioEnabled, 
-      videoEnabled: p.videoEnabled 
+    ...peers.map(p => ({
+      type: "peer",
+      id: p.id,
+      stream: p.peer?.remoteStream,
+      name: p.name,
+      audioEnabled: p.audioEnabled,
+      videoEnabled: p.videoEnabled
     }))
   ];
 
-  // Vùng trung tâm ưu tiên: cột 2-5, hàng 2-3 (8 ô)
-  const centerCells = [];
-  for (let r = 2; r <= 3; r++) {
-    for (let c = 2; c <= 5; c++) {
-      centerCells.push((r - 1) * totalCols + (c - 1));
-    }
+  // Tạo danh sách tất cả các ô (trừ ô local) để xếp các nguồn khác
+  const availableCells = [];
+  for (let i = 0; i < cols * rows; i++) {
+    const r = Math.floor(i / cols) + 1;
+    const c = (i % cols) + 1;
+    if (r === localRow && c === localCol) continue; // bỏ qua ô local
+    availableCells.push(i);
   }
 
-  // Các ô còn lại (trừ ô local)
-  const allOtherCells = [];
-  for (let i = 0; i < totalCols * totalRows; i++) {
-    const row = Math.floor(i / totalCols) + 1;
-    const col = (i % totalCols) + 1;
-    if (row === localRow && col === localCol) continue;
-    allOtherCells.push(i);
-  }
-
-  // Gán vị trí: local cố định, các nguồn khác lần lượt vào center rồi other
+  // Gán vị trí: local cố định, các nguồn khác lấy lần lượt từ availableCells
   const positions = new Map();
   videoSources.forEach((src, idx) => {
     if (src.type === "local") {
       positions.set(src.id, localIndex);
     } else {
       const peerIdx = idx - 1; // bỏ qua local
-      if (peerIdx < centerCells.length) {
-        positions.set(src.id, centerCells[peerIdx]);
+      if (peerIdx < availableCells.length) {
+        positions.set(src.id, availableCells[peerIdx]);
       } else {
-        const otherIdx = peerIdx - centerCells.length;
-        if (otherIdx < allOtherCells.length) {
-          positions.set(src.id, allOtherCells[otherIdx]);
-        }
+        console.warn("Not enough grid cells for all peers");
       }
     }
   });
@@ -172,15 +189,20 @@ function CallUI() {
   return (
     <div className="fixed inset-0 bg-gray-900">
       <div className="h-full p-4">
-        <div className="grid grid-cols-6 grid-rows-4 gap-4 h-full">
+        <div 
+          className="grid gap-4 h-full"
+          style={{
+            gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`
+          }}
+        >
           {videoSources.map((src) => {
             const cellIndex = positions.get(src.id);
             if (cellIndex === undefined) return null;
 
-            const row = Math.floor(cellIndex / totalCols) + 1;
-            const col = (cellIndex % totalCols) + 1;
+            const row = Math.floor(cellIndex / cols) + 1;
+            const col = (cellIndex % cols) + 1;
 
-            // Local camera
             if (src.type === "local") {
               return (
                 <div
@@ -195,6 +217,7 @@ function CallUI() {
                     audioEnabled={audioEnabled}
                     videoEnabled={videoEnabled}
                     onNameChange={changeName}
+                    localStream={localStream}
                   />
                   {/* Overlay các nút điều khiển */}
                   <div className="absolute top-2 right-2 flex gap-2">
@@ -234,7 +257,6 @@ function CallUI() {
               );
             }
 
-            // Screen share
             if (src.type === "screen") {
               return (
                 <div
@@ -248,6 +270,7 @@ function CallUI() {
                     isLocal={false}
                     audioEnabled={false}
                     videoEnabled={true}
+                    localStream={localStream}
                   />
                 </div>
               );
@@ -266,6 +289,7 @@ function CallUI() {
                   isLocal={false}
                   audioEnabled={src.audioEnabled}
                   videoEnabled={src.videoEnabled}
+                  localStream={localStream}
                 />
               </div>
             );

@@ -22,10 +22,20 @@ export const CallProvider = ({ children, roomId }) => {
 
   const peersRef = useRef([]);
   const localVideoRef = useRef();
+  const audioEnabledRef = useRef(audioEnabled);
+  const videoEnabledRef = useRef(videoEnabled);
 
-  // Socket connection
   useEffect(() => {
-    const newSocket = io("http://localhost:5000", { transports: ["websocket"] });
+    audioEnabledRef.current = audioEnabled;
+  }, [audioEnabled]);
+
+  useEffect(() => {
+    videoEnabledRef.current = videoEnabled;
+  }, [videoEnabled]);
+
+  // Socket connection (relative path)
+  useEffect(() => {
+    const newSocket = io({ transports: ["websocket"] });
     setSocket(newSocket);
     return () => newSocket.disconnect();
   }, []);
@@ -79,6 +89,7 @@ export const CallProvider = ({ children, roomId }) => {
   useEffect(() => {
     if (!socket) return;
     socket.on("peer-media-state", ({ userId, audioEnabled, videoEnabled }) => {
+      console.log(`[peer-media-state] from ${userId}: audio=${audioEnabled}, video=${videoEnabled}`);
       setPeers(prev => prev.map(p => 
         p.id === userId ? { ...p, audioEnabled, videoEnabled } : p
       ));
@@ -104,10 +115,14 @@ export const CallProvider = ({ children, roomId }) => {
 
   // Helper to replace video track for all peers (used in screen share)
   const replaceVideoTrackForAll = (newTrack) => {
-    peersRef.current.forEach(({ peer }) => {
+    console.log(`replaceVideoTrackForAll: newTrack id=${newTrack.id}, enabled=${newTrack.enabled}`);
+    peersRef.current.forEach(({ peer, id }) => {
       const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
       if (sender) {
+        console.log(`Replacing track for peer ${id}, current track id=${sender.track?.id}`);
         sender.replaceTrack(newTrack).catch(err => console.error('replaceTrack error:', err));
+      } else {
+        console.warn(`No video sender found for peer ${id}`);
       }
     });
   };
@@ -138,7 +153,6 @@ export const CallProvider = ({ children, roomId }) => {
       peersRef.current.push(newPeer);
       setPeers((prev) => [...prev, newPeer]);
 
-      // Nếu đang share màn hình, thay track video của peer mới bằng screen track
       if (screenSharing && screenStream) {
         const screenTrack = screenStream.getVideoTracks()[0];
         const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
@@ -174,7 +188,9 @@ export const CallProvider = ({ children, roomId }) => {
       socket.emit("sending-signal", { userToSignal, signal });
     });
     peer.on("stream", (remoteStream) => {
-      // Force re-render khi có stream mới
+      console.log(`Received stream from ${userToSignal}`, remoteStream.id,
+        remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
+      peer.remoteStream = remoteStream;
       setPeers(prev => prev.map(p => p.id === userToSignal ? { ...p } : p));
     });
     return peer;
@@ -186,6 +202,9 @@ export const CallProvider = ({ children, roomId }) => {
       socket.emit("returning-signal", { userToSignal: incomingID, signal });
     });
     peer.on("stream", (remoteStream) => {
+      console.log(`Received stream from ${incomingID}`, remoteStream.id,
+        remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
+      peer.remoteStream = remoteStream;
       setPeers(prev => prev.map(p => p.id === incomingID ? { ...p } : p));
     });
     return peer;
@@ -199,7 +218,21 @@ export const CallProvider = ({ children, roomId }) => {
     const newState = !audioTrack.enabled;
     audioTrack.enabled = newState;
     setAudioEnabled(newState);
-    socket.emit("media-state-change", { audioEnabled: newState, videoEnabled });
+
+    const videoTrack = localStream.getVideoTracks()[0];
+    const currentVideoState = videoTrack ? videoTrack.enabled : videoEnabledRef.current;
+
+    console.log(`[toggleAudio] audio: ${newState ? 'ON' : 'OFF'}, video: ${currentVideoState ? 'ON' : 'OFF'}`);
+    socket.emit("media-state-change", { 
+      audioEnabled: newState, 
+      videoEnabled: currentVideoState 
+    });
+
+    setTimeout(() => {
+      const checkAudio = localStream.getAudioTracks()[0];
+      const checkVideo = localStream.getVideoTracks()[0];
+      console.log(`[check after toggleAudio] audio enabled: ${checkAudio?.enabled}, video enabled: ${checkVideo?.enabled}`);
+    }, 100);
   };
 
   const toggleVideo = () => {
@@ -209,7 +242,23 @@ export const CallProvider = ({ children, roomId }) => {
     const newState = !videoTrack.enabled;
     videoTrack.enabled = newState;
     setVideoEnabled(newState);
-    socket.emit("media-state-change", { audioEnabled, videoEnabled: newState });
+
+    const audioTrack = localStream.getAudioTracks()[0];
+    const currentAudioState = audioTrack ? audioTrack.enabled : audioEnabledRef.current;
+
+    console.log(`[toggleVideo] video: ${newState ? 'ON' : 'OFF'}, audio: ${currentAudioState ? 'ON' : 'OFF'}, videoTrack.id=${videoTrack.id}`);
+    socket.emit("media-state-change", { 
+      audioEnabled: currentAudioState, 
+      videoEnabled: newState 
+    });
+
+    // KHÔNG gọi replaceVideoTrackForAll ở đây
+
+    setTimeout(() => {
+      const checkAudio = localStream.getAudioTracks()[0];
+      const checkVideo = localStream.getVideoTracks()[0];
+      console.log(`[check after toggleVideo] audio enabled: ${checkAudio?.enabled}, video enabled: ${checkVideo?.enabled}, videoTrack.id=${checkVideo?.id}`);
+    }, 100);
   };
 
   const startScreenShare = async () => {
@@ -233,6 +282,7 @@ export const CallProvider = ({ children, roomId }) => {
   const stopScreenShare = () => {
     if (!screenStream) return;
     const cameraTrack = localStream.getVideoTracks()[0];
+    console.log('stopScreenShare: cameraTrack id=', cameraTrack.id, 'enabled=', cameraTrack.enabled);
 
     replaceVideoTrackForAll(cameraTrack);
 

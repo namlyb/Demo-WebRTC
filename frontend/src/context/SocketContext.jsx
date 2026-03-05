@@ -11,9 +11,7 @@ export const SocketProvider = ({children})=>{
 
   useEffect(()=>{
 
-    const s = io("http://localhost:5000",{
-      transports:["websocket"]
-    });
+    const s = io({ transports: ["websocket"] });
 
     setSocket(s);
 
