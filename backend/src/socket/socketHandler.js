@@ -8,6 +8,7 @@ export default function socketHandler(io) {
     // Khởi tạo trạng thái media mặc định
     socket.data.audioEnabled = true;
     socket.data.videoEnabled = true;
+    socket.data.screenSharing = false;
 
     socket.on("join-room", async ({ roomCode }) => {
       const name = RandomNameService.generate();
@@ -27,7 +28,8 @@ export default function socketHandler(io) {
           const s = io.sockets.sockets.get(id);
           return {
             id,
-            name: s?.data?.name
+            name: s?.data?.name,
+            screenSharing: s?.data?.screenSharing || false
           };
         });
 
@@ -48,7 +50,8 @@ export default function socketHandler(io) {
 
       socket.to(roomCode).emit("user-joined", {
         id: socket.id,
-        name
+        name,
+        screenSharing: socket.data.screenSharing
       });
     });
 
@@ -84,6 +87,17 @@ export default function socketHandler(io) {
         userId: socket.id,
         name: newName
       });
+    });
+
+    // Screen share events
+    socket.on("screen-share-start", () => {
+      socket.data.screenSharing = true;
+      socket.to(socket.data.roomCode).emit("peer-screen-share-start", socket.id);
+    });
+
+    socket.on("screen-share-stop", () => {
+      socket.data.screenSharing = false;
+      socket.to(socket.data.roomCode).emit("peer-screen-share-stop", socket.id);
     });
 
     socket.on("disconnect", async () => {
