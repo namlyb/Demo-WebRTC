@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import Peer from "simple-peer";
 
@@ -33,7 +33,7 @@ export const CallProvider = ({ children, roomId }) => {
     videoEnabledRef.current = videoEnabled;
   }, [videoEnabled]);
 
-  // Socket connection (relative path)
+  // Socket connection
   useEffect(() => {
     const newSocket = io({ transports: ["websocket"] });
     setSocket(newSocket);
@@ -114,8 +114,8 @@ export const CallProvider = ({ children, roomId }) => {
   }, [socket]);
 
   // Helper to replace video track for all peers (used in screen share)
-  const replaceVideoTrackForAll = (newTrack) => {
-    console.log(`replaceVideoTrackForAll: newTrack id=${newTrack.id}, enabled=${newTrack.enabled}`);
+  const replaceVideoTrackForAll = useCallback((newTrack) => {
+    console.log(`replaceVideoTrackForAll: newTrack id=${newTrack?.id}, enabled=${newTrack?.enabled}`);
     peersRef.current.forEach(({ peer, id }) => {
       const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
       if (sender) {
@@ -125,7 +125,43 @@ export const CallProvider = ({ children, roomId }) => {
         console.warn(`No video sender found for peer ${id}`);
       }
     });
-  };
+  }, []);
+
+  // Refresh audio track for all peers
+  const refreshAudioTrackForAll = useCallback(() => {
+    if (!localStream) return;
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+    peersRef.current.forEach(({ peer, id }) => {
+      const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'audio');
+      if (sender) {
+        console.log(`Refreshing audio track for peer ${id}`);
+        sender.replaceTrack(audioTrack).catch(err => 
+          console.error('refresh audio replaceTrack error:', err)
+        );
+      } else {
+        console.warn(`No audio sender for peer ${id} yet`);
+      }
+    });
+  }, [localStream]);
+
+  // Refresh video track for all peers
+  const refreshVideoTrackForAll = useCallback(() => {
+    if (!localStream) return;
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (!videoTrack) return;
+    peersRef.current.forEach(({ peer, id }) => {
+      const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) {
+        console.log(`Refreshing video track for peer ${id}`);
+        sender.replaceTrack(videoTrack).catch(err => 
+          console.error('refresh video replaceTrack error:', err)
+        );
+      } else {
+        console.warn(`No video sender for peer ${id} yet`);
+      }
+    });
+  }, [localStream]);
 
   // Socket events for peers
   useEffect(() => {
@@ -210,57 +246,66 @@ export const CallProvider = ({ children, roomId }) => {
     return peer;
   };
 
-  // Media controls
-  const toggleAudio = () => {
+  // Toggle Audio
+  const toggleAudio = useCallback(() => {
     if (!localStream) return;
     const audioTrack = localStream.getAudioTracks()[0];
     if (!audioTrack) return;
     const newState = !audioTrack.enabled;
     audioTrack.enabled = newState;
     setAudioEnabled(newState);
+    audioEnabledRef.current = newState;
 
     const videoTrack = localStream.getVideoTracks()[0];
     const currentVideoState = videoTrack ? videoTrack.enabled : videoEnabledRef.current;
 
     console.log(`[toggleAudio] audio: ${newState ? 'ON' : 'OFF'}, video: ${currentVideoState ? 'ON' : 'OFF'}`);
+    console.log('Emitting media-state-change (audio):', { audioEnabled: newState, videoEnabled: currentVideoState });
     socket.emit("media-state-change", { 
       audioEnabled: newState, 
       videoEnabled: currentVideoState 
     });
 
-    setTimeout(() => {
-      const checkAudio = localStream.getAudioTracks()[0];
-      const checkVideo = localStream.getVideoTracks()[0];
-      console.log(`[check after toggleAudio] audio enabled: ${checkAudio?.enabled}, video enabled: ${checkVideo?.enabled}`);
-    }, 100);
-  };
+    // Luôn refresh audio track khi bật hoặc tắt để đảm bảo sender hoạt động
+    refreshAudioTrackForAll();
+  }, [localStream, socket, refreshAudioTrackForAll]);
 
-  const toggleVideo = () => {
+  // Toggle Video
+  const toggleVideo = useCallback(() => {
     if (!localStream) return;
     const videoTrack = localStream.getVideoTracks()[0];
     if (!videoTrack) return;
     const newState = !videoTrack.enabled;
     videoTrack.enabled = newState;
     setVideoEnabled(newState);
+    videoEnabledRef.current = newState;
 
+    // Lấy trạng thái audio hiện tại từ track (đã được cập nhật đồng bộ)
     const audioTrack = localStream.getAudioTracks()[0];
     const currentAudioState = audioTrack ? audioTrack.enabled : audioEnabledRef.current;
 
     console.log(`[toggleVideo] video: ${newState ? 'ON' : 'OFF'}, audio: ${currentAudioState ? 'ON' : 'OFF'}, videoTrack.id=${videoTrack.id}`);
+    console.log('Emitting media-state-change (video):', { audioEnabled: currentAudioState, videoEnabled: newState });
     socket.emit("media-state-change", { 
       audioEnabled: currentAudioState, 
       videoEnabled: newState 
     });
 
-    // KHÔNG gọi replaceVideoTrackForAll ở đây
+    if (newState) {
+      // Bật video: refresh video (nếu không share màn hình) và audio
+      if (!screenSharing) {
+        console.log('Calling refreshVideoTrackForAll');
+        refreshVideoTrackForAll();
+      }
+      refreshAudioTrackForAll();
+    } else {
+      // Tắt video: chỉ refresh audio để duy trì âm thanh
+      console.log('Tắt video, refresh audio để giữ âm thanh');
+      refreshAudioTrackForAll();
+    }
+  }, [localStream, socket, screenSharing, refreshVideoTrackForAll, refreshAudioTrackForAll]);
 
-    setTimeout(() => {
-      const checkAudio = localStream.getAudioTracks()[0];
-      const checkVideo = localStream.getVideoTracks()[0];
-      console.log(`[check after toggleVideo] audio enabled: ${checkAudio?.enabled}, video enabled: ${checkVideo?.enabled}, videoTrack.id=${checkVideo?.id}`);
-    }, 100);
-  };
-
+  // Screen Share
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -291,12 +336,12 @@ export const CallProvider = ({ children, roomId }) => {
     setScreenSharing(false);
   };
 
-  const toggleScreenShare = () => {
+  const toggleScreenShare = useCallback(() => {
     if (screenSharing) stopScreenShare();
     else startScreenShare();
-  };
+  }, [screenSharing]);
 
-  const leaveRoom = () => {
+  const leaveRoom = useCallback(() => {
     socket.emit("leave-room", { roomCode: roomId });
     peersRef.current.forEach(({ peer }) => peer.destroy());
     peersRef.current = [];
@@ -304,12 +349,12 @@ export const CallProvider = ({ children, roomId }) => {
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
     if (screenStream) screenStream.getTracks().forEach((track) => track.stop());
     socket.disconnect();
-  };
+  }, [socket, roomId, localStream, screenStream]);
 
-  const changeName = (newName) => {
+  const changeName = useCallback((newName) => {
     setMyName(newName);
     socket.emit("change-name", newName);
-  };
+  }, [socket]);
 
   return (
     <CallContext.Provider

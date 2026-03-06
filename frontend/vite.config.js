@@ -19,7 +19,7 @@ export default defineConfig({
   define: {
     global: 'globalThis',
     'process.env': {},
-    'process.nextTick': 'queueMicrotask' // Thêm dòng này để polyfill nextTick
+    'process.nextTick': 'queueMicrotask'
   },
   optimizeDeps: {
     include: ['simple-peer', 'buffer', 'process']

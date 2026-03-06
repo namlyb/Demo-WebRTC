@@ -17,19 +17,20 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
   const [newName, setNewName] = useState(name);
   const inputRef = useRef();
 
+  // Luôn gán stream vào video element (để âm thanh phát ngay cả khi video tắt)
   useEffect(() => {
-    if (videoRef.current) {
-      if (stream) {
-        if (!isLocal && stream === localStream) {
-          console.error("Remote tile received local stream!");
-          return;
-        }
-        videoRef.current.srcObject = stream;
-      } else {
-        videoRef.current.srcObject = null;
-      }
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
     }
-  }, [stream, isLocal, localStream]);
+  }, [stream]);
+
+  // Force refresh khi stream thay đổi (cần cho trường hợp replace track)
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      // Gán lại để kích hoạt
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream, audioEnabled, videoEnabled]); // Thêm dependencies để force update
 
   const handleNameClick = () => {
     if (isLocal) {
@@ -50,22 +51,31 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
     if (e.key === "Escape") setEditing(false);
   };
 
-  const hasVideo = isLocal
-    ? stream && stream.getVideoTracks().some(track => track.enabled)
-    : videoEnabled;
+  // Xác định xem có hiển thị video hay không
+  const showVideo = isLocal
+    ? stream && videoEnabled // Local: hiển thị nếu video bật
+    : stream && videoEnabled; // Remote: hiển thị nếu video bật, nhưng vẫn phát âm thanh dù không hiển thị
 
   return (
     <div className="relative w-full h-full bg-gray-800 rounded-lg overflow-hidden">
-      {stream && hasVideo ? (
-        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover" />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center bg-gray-700 text-white">
+      {/* Thẻ video luôn được render (cho cả local và remote) để đảm bảo âm thanh phát */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        className={`w-full h-full object-cover ${showVideo ? '' : 'hidden'}`}
+      />
+      
+      {/* Placeholder khi video tắt */}
+      {!showVideo && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-700 text-white">
           <span className="text-lg font-semibold">{name || "Guest"}</span>
         </div>
       )}
 
       {/* Tên hiển thị ở góc dưới bên trái */}
-      <div className="absolute bottom-2 left-2 bg-black/50 text-white px-2 py-1 rounded text-sm">
+      <div className="absolute bottom-2 left-2 bg-black/50 text-white px-2 py-1 rounded text-sm z-10">
         {editing ? (
           <input
             ref={inputRef}
@@ -84,7 +94,7 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
       </div>
 
       {/* Trạng thái mic/camera cho tất cả (local và remote) */}
-      <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded">
+      <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded z-10">
         {audioEnabled ? (
           <FaMicrophone className="text-white" size={14} />
         ) : (
@@ -96,13 +106,6 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
           <FaVideoSlash className="text-red-500" size={14} />
         )}
       </div>
-
-      {/* Các nút điều khiển chỉ hiện cho local */}
-      {isLocal && (
-        <div className="absolute top-2 left-2 flex gap-2">
-          {/* Các nút điều khiển được render bên ngoài component này từ CallUI */}
-        </div>
-      )}
     </div>
   );
 }
@@ -124,7 +127,7 @@ function CallUI() {
     changeName,
   } = useCall();
 
-  // Responsive: xác định số cột và số hàng dựa trên kích thước màn hình
+  // Responsive grid
   const [cols, setCols] = useState(6); // desktop
   const [rows, setRows] = useState(4); // desktop: 6x4 = 24 ô
 
@@ -162,16 +165,16 @@ function CallUI() {
     }))
   ];
 
-  // Tạo danh sách tất cả các ô (trừ ô local) để xếp các nguồn khác
+  // Tạo danh sách tất cả các ô (trừ ô local)
   const availableCells = [];
   for (let i = 0; i < cols * rows; i++) {
     const r = Math.floor(i / cols) + 1;
     const c = (i % cols) + 1;
-    if (r === localRow && c === localCol) continue; // bỏ qua ô local
+    if (r === localRow && c === localCol) continue;
     availableCells.push(i);
   }
 
-  // Gán vị trí: local cố định, các nguồn khác lấy lần lượt từ availableCells
+  // Gán vị trí
   const positions = new Map();
   videoSources.forEach((src, idx) => {
     if (src.type === "local") {
@@ -220,7 +223,7 @@ function CallUI() {
                     localStream={localStream}
                   />
                   {/* Overlay các nút điều khiển */}
-                  <div className="absolute top-2 right-2 flex gap-2">
+                  <div className="absolute top-2 right-2 flex gap-2 z-20">
                     <button
                       onClick={toggleAudio}
                       className={`p-2 rounded-full ${audioEnabled ? "bg-gray-600" : "bg-red-600"} text-white hover:opacity-80 transition`}
