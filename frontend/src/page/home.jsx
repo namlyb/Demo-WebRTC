@@ -17,16 +17,24 @@ export default function Home() {
   const createRoom = async () => {
     const newRoom = Math.random().toString(36).substring(2, 8);
     try {
+      // Tạo phòng
       await axios.post("/rooms/create", {
         roomCode: newRoom,
         password: createPassword,
         maxParticipants,
       });
+
+      // Sau khi tạo, thực hiện join phòng (để tăng participant count và kiểm tra)
+      await axios.post("/rooms/join", {
+        roomCode: newRoom,
+        password: createPassword,
+      });
+
       const params = new URLSearchParams({ roomId: newRoom });
       if (createPassword) params.set("password", createPassword);
       navigate(`/?${params.toString()}`);
     } catch (err) {
-      alert(err.response?.data?.message);
+      alert(err.response?.data?.message || "Lỗi khi tạo phòng");
     }
   };
 
