@@ -10,55 +10,54 @@ export const useCall = () => {
   return context;
 };
 
+// ICE servers – nếu test giữa Wifi và 4G, cần TURN server (liên hệ mình để biết thêm)
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    // Bạn có thể thêm TURN server ở đây nếu cần
+  ],
+};
+
 export const CallProvider = ({ children, roomId }) => {
   const [socket, setSocket] = useState(null);
   const [localStream, setLocalStream] = useState(null);
-  const [screenStream, setScreenStream] = useState(null);
   const [peers, setPeers] = useState([]);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(false);
-  const [screenSharing, setScreenSharing] = useState(false);
   const [myName, setMyName] = useState("");
 
   const peersRef = useRef([]);
-  const localVideoRef = useRef();
-  const audioEnabledRef = useRef(audioEnabled);
-  const videoEnabledRef = useRef(videoEnabled);
 
+  // --- Socket initialization ---
   useEffect(() => {
-    audioEnabledRef.current = audioEnabled;
-  }, [audioEnabled]);
-
-  useEffect(() => {
-    videoEnabledRef.current = videoEnabled;
-  }, [videoEnabled]);
-
-  // Socket connection
-  useEffect(() => {
-    const newSocket = io({ transports: ["websocket"] });
-    setSocket(newSocket);
-    return () => newSocket.disconnect();
+    const s = io({ transports: ["websocket"] });
+    setSocket(s);
+    return () => s.disconnect();
   }, []);
 
-  // Get local media
+  // --- Get local media ---
   useEffect(() => {
     const init = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+          audio: true,
+        });
         const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack) {
-          videoTrack.enabled = false;
-        }
+        if (videoTrack) videoTrack.enabled = false; // tắt video lúc đầu
         setLocalStream(stream);
-        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        console.log("Local stream obtained", stream.id,
+          stream.getTracks().map(t => `${t.kind}:${t.enabled}`));
       } catch (err) {
-        console.error("Failed to get local stream:", err);
+        console.error("❌ getUserMedia error", err);
       }
     };
     init();
   }, []);
 
-  // Join room
+  // --- Join room when ready ---
   useEffect(() => {
     if (!socket || !roomId || !localStream) return;
     const joinRoom = () => socket.emit("join-room", { roomCode: roomId });
@@ -67,294 +66,233 @@ export const CallProvider = ({ children, roomId }) => {
     return () => socket.off("connect", joinRoom);
   }, [socket, roomId, localStream]);
 
-  // Listen for your-name
+  // --- Helper xử lý stream từ peer ---
+  const handlePeerStream = useCallback((peerId, remoteStream) => {
+    console.log(`🎥 [${peerId}] received stream`, remoteStream.id,
+      remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
+
+    const peerRef = peersRef.current.find(p => p.id === peerId);
+    if (peerRef) {
+      peerRef.peer.remoteStream = remoteStream;
+    }
+
+    setPeers(prev => prev.map(p =>
+      p.id === peerId ? { ...p, peer: { ...p.peer, remoteStream } } : p
+    ));
+  }, []);
+
+  // --- Socket event listeners ---
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !localStream) return;
+
     socket.on("your-name", (name) => setMyName(name));
-    return () => socket.off("your-name");
-  }, [socket]);
 
-  // Listen for initial media states
-  useEffect(() => {
-    if (!socket) return;
-    socket.on("initial-media-states", (states) => {
-      setPeers(prev => prev.map(p => {
-        const state = states.find(s => s.userId === p.id);
-        if (state) {
-          return { ...p, audioEnabled: state.audioEnabled, videoEnabled: state.videoEnabled };
-        }
-        return p;
-      }));
+    socket.on("all-users", (users) => {
+      console.log("📡 all-users", users);
+      const peersArr = [];
+      users.forEach((user) => {
+        const peer = createPeer(user.id, localStream);
+        peersRef.current.push({
+          id: user.id,
+          peer,
+          name: user.name,
+          audioEnabled: true,
+          videoEnabled: true,
+        });
+        peersArr.push({ id: user.id, peer, name: user.name, audioEnabled: true, videoEnabled: true });
+      });
+      setPeers(peersArr);
     });
-    return () => socket.off("initial-media-states");
-  }, [socket]);
 
-  // Listen for peer media state changes
-  useEffect(() => {
-    if (!socket) return;
+    socket.on("user-joined", ({ id, name }) => {
+      console.log("➕ user-joined", id, name);
+      const peer = addPeer(id, localStream);
+      const newPeer = { id, peer, name, audioEnabled: true, videoEnabled: true };
+      peersRef.current.push(newPeer);
+      setPeers((prev) => [...prev, newPeer]);
+    });
+
+    socket.on("receiving-signal", ({ id, signal }) => {
+      console.log("📨 receiving-signal from", id);
+      const item = peersRef.current.find((p) => p.id === id);
+      if (item && item.peer && !item.peer.destroyed) {
+        item.peer.signal(signal);
+      }
+    });
+
+    socket.on("user-left", (id) => {
+      console.log("➖ user-left", id);
+      const peerObj = peersRef.current.find((p) => p.id === id);
+      if (peerObj && peerObj.peer && !peerObj.peer.destroyed) {
+        peerObj.peer.destroy();
+      }
+      peersRef.current = peersRef.current.filter((p) => p.id !== id);
+      setPeers((prev) => prev.filter((p) => p.id !== id));
+    });
+
+    socket.on("initial-media-states", (states) => {
+      console.log("📊 initial-media-states", states);
+      setPeers((prev) =>
+        prev.map((p) => {
+          const state = states.find((s) => s.userId === p.id);
+          return state ? { ...p, audioEnabled: state.audioEnabled, videoEnabled: state.videoEnabled } : p;
+        })
+      );
+      states.forEach(({ userId, audioEnabled, videoEnabled }) => {
+        const peerRef = peersRef.current.find((p) => p.id === userId);
+        if (peerRef) {
+          peerRef.audioEnabled = audioEnabled;
+          peerRef.videoEnabled = videoEnabled;
+        }
+      });
+    });
+
     socket.on("peer-media-state", ({ userId, audioEnabled, videoEnabled }) => {
-      console.log(`[peer-media-state] from ${userId}: audio=${audioEnabled}, video=${videoEnabled}`);
-      setPeers(prev => prev.map(p => 
-        p.id === userId ? { ...p, audioEnabled, videoEnabled } : p
-      ));
-      const peerRef = peersRef.current.find(p => p.id === userId);
+      console.log("🔄 peer-media-state", userId, audioEnabled, videoEnabled);
+      setPeers((prev) => prev.map((p) => (p.id === userId ? { ...p, audioEnabled, videoEnabled } : p)));
+      const peerRef = peersRef.current.find((p) => p.id === userId);
       if (peerRef) {
         peerRef.audioEnabled = audioEnabled;
         peerRef.videoEnabled = videoEnabled;
       }
     });
-    return () => socket.off("peer-media-state");
-  }, [socket]);
 
-  // Listen for peer name changes
-  useEffect(() => {
-    if (!socket) return;
     socket.on("peer-name-changed", ({ userId, name }) => {
-      setPeers(prev => prev.map(p => p.id === userId ? { ...p, name } : p));
-      const peerRef = peersRef.current.find(p => p.id === userId);
+      setPeers((prev) => prev.map((p) => (p.id === userId ? { ...p, name } : p)));
+      const peerRef = peersRef.current.find((p) => p.id === userId);
       if (peerRef) peerRef.name = name;
     });
-    return () => socket.off("peer-name-changed");
-  }, [socket]);
-
-  // Listen for peer screen share events
-  useEffect(() => {
-    if (!socket) return;
-    socket.on("peer-screen-share-start", (userId) => {
-      setPeers(prev => prev.map(p => p.id === userId ? { ...p, screenSharing: true } : p));
-      const peerRef = peersRef.current.find(p => p.id === userId);
-      if (peerRef) peerRef.screenSharing = true;
-    });
-    socket.on("peer-screen-share-stop", (userId) => {
-      setPeers(prev => prev.map(p => p.id === userId ? { ...p, screenSharing: false } : p));
-      const peerRef = peersRef.current.find(p => p.id === userId);
-      if (peerRef) peerRef.screenSharing = false;
-    });
-    return () => {
-      socket.off("peer-screen-share-start");
-      socket.off("peer-screen-share-stop");
-    };
-  }, [socket]);
-
-  // Helper to replace video track for all peers (used in screen share)
-  const replaceVideoTrackForAll = useCallback((newTrack) => {
-    console.log(`replaceVideoTrackForAll: newTrack id=${newTrack?.id}, enabled=${newTrack?.enabled}`);
-    peersRef.current.forEach(({ peer, id }) => {
-      const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
-      if (sender) {
-        console.log(`Replacing track for peer ${id}, current track id=${sender.track?.id}`);
-        sender.replaceTrack(newTrack).catch(err => console.error('replaceTrack error:', err));
-      } else {
-        console.warn(`No video sender found for peer ${id}`);
-      }
-    });
-  }, []);
-
-  // Socket events for peers
-  useEffect(() => {
-    if (!socket || !localStream) return;
-
-    socket.on("all-users", (users) => {
-      const peersArr = [];
-      users.forEach((user) => {
-        const peer = createPeer(user.id, localStream);
-        peersRef.current.push({ 
-          id: user.id, 
-          peer, 
-          name: user.name,
-          audioEnabled: true, 
-          videoEnabled: true,
-          screenSharing: user.screenSharing || false
-        });
-        peersArr.push({ 
-          id: user.id, 
-          peer, 
-          name: user.name, 
-          audioEnabled: true, 
-          videoEnabled: true,
-          screenSharing: user.screenSharing || false
-        });
-      });
-      setPeers(peersArr);
-    });
-
-    socket.on("user-joined", ({ id, name, screenSharing }) => {
-      const peer = addPeer(id, localStream);
-      const newPeer = { 
-        id, 
-        peer, 
-        name, 
-        audioEnabled: true, 
-        videoEnabled: true,
-        screenSharing: screenSharing || false
-      };
-      peersRef.current.push(newPeer);
-      setPeers((prev) => [...prev, newPeer]);
-
-      if (screenSharing && screenStream) {
-        const screenTrack = screenStream.getVideoTracks()[0];
-        const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
-        if (sender) {
-          sender.replaceTrack(screenTrack).catch(err => console.error('replaceTrack for new peer error:', err));
-        }
-      }
-    });
-
-    socket.on("receiving-signal", ({ id, signal }) => {
-      const item = peersRef.current.find((p) => p.id === id);
-      if (item) item.peer.signal(signal);
-    });
-
-    socket.on("user-left", (id) => {
-      const peerObj = peersRef.current.find((p) => p.id === id);
-      if (peerObj) peerObj.peer.destroy();
-      peersRef.current = peersRef.current.filter((p) => p.id !== id);
-      setPeers((prev) => prev.filter((p) => p.id !== id));
-    });
 
     return () => {
+      socket.off("your-name");
       socket.off("all-users");
       socket.off("user-joined");
       socket.off("receiving-signal");
       socket.off("user-left");
+      socket.off("initial-media-states");
+      socket.off("peer-media-state");
+      socket.off("peer-name-changed");
     };
-  }, [socket, localStream, screenSharing, screenStream]);
+  }, [socket, localStream]);
 
+  // --- Tạo peer (initiator) ---
   const createPeer = (userToSignal, stream) => {
-    const peer = new Peer({ initiator: true, trickle: false, stream });
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream,
+      config: ICE_SERVERS,
+    });
+
     peer.on("signal", (signal) => {
+      console.log("📤 sending-signal to", userToSignal);
       socket.emit("sending-signal", { userToSignal, signal });
     });
+
     peer.on("stream", (remoteStream) => {
-      console.log(`Received stream from ${userToSignal}`, remoteStream.id,
-        remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
-      peer.remoteStream = remoteStream;
-      setPeers(prev => prev.map(p => p.id === userToSignal ? { ...p } : p));
+      handlePeerStream(userToSignal, remoteStream);
     });
+
+    peer.on("connect", () => console.log("✅ peer connected to", userToSignal));
+    peer.on("error", (err) => {
+      console.error("❌ peer error", userToSignal, err);
+      // Xóa peer khỏi danh sách nếu lỗi nghiêm trọng
+      if (err.message.includes("Close called") || err.message.includes("Connection failed")) {
+        const peerRef = peersRef.current.find(p => p.id === userToSignal);
+        if (peerRef && !peerRef.peer.destroyed) {
+          peerRef.peer.destroy();
+        }
+        peersRef.current = peersRef.current.filter(p => p.id !== userToSignal);
+        setPeers(prev => prev.filter(p => p.id !== userToSignal));
+      }
+    });
+
     return peer;
   };
 
+  // --- Thêm peer (non-initiator) ---
   const addPeer = (incomingID, stream) => {
-    const peer = new Peer({ initiator: false, trickle: false, stream });
+    const peer = new Peer({
+      initiator: false,
+      trickle: false,
+      stream,
+      config: ICE_SERVERS,
+    });
+
     peer.on("signal", (signal) => {
+      console.log("📤 returning-signal to", incomingID);
       socket.emit("returning-signal", { userToSignal: incomingID, signal });
     });
+
     peer.on("stream", (remoteStream) => {
-      console.log(`Received stream from ${incomingID}`, remoteStream.id,
-        remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
-      peer.remoteStream = remoteStream;
-      setPeers(prev => prev.map(p => p.id === incomingID ? { ...p } : p));
+      handlePeerStream(incomingID, remoteStream);
     });
+
+    peer.on("connect", () => console.log("✅ peer connected to", incomingID));
+    peer.on("error", (err) => {
+      console.error("❌ peer error", incomingID, err);
+      if (err.message.includes("Close called") || err.message.includes("Connection failed")) {
+        const peerRef = peersRef.current.find(p => p.id === incomingID);
+        if (peerRef && !peerRef.peer.destroyed) {
+          peerRef.peer.destroy();
+        }
+        peersRef.current = peersRef.current.filter(p => p.id !== incomingID);
+        setPeers(prev => prev.filter(p => p.id !== incomingID));
+      }
+    });
+
     return peer;
   };
 
-  // Toggle Audio
+  // --- Toggle audio ---
   const toggleAudio = useCallback(() => {
     if (!localStream) return;
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (!audioTrack) return;
-    const newState = !audioTrack.enabled;
-    audioTrack.enabled = newState;
+    const track = localStream.getAudioTracks()[0];
+    if (!track) return;
+    const newState = !track.enabled;
+    track.enabled = newState;
     setAudioEnabled(newState);
-    audioEnabledRef.current = newState;
+    socket.emit("media-state-change", { audioEnabled: newState, videoEnabled });
+  }, [localStream, socket, videoEnabled]);
 
-    const videoTrack = localStream.getVideoTracks()[0];
-    const currentVideoState = videoTrack ? videoTrack.enabled : videoEnabledRef.current;
-
-    console.log(`[toggleAudio] audio: ${newState ? 'ON' : 'OFF'}, video: ${currentVideoState ? 'ON' : 'OFF'}`);
-    socket.emit("media-state-change", { 
-      audioEnabled: newState, 
-      videoEnabled: currentVideoState 
-    });
-  }, [localStream, socket]);
-
-  // Toggle Video
+  // --- Toggle video ---
   const toggleVideo = useCallback(() => {
     if (!localStream) return;
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (!videoTrack) return;
-    const newState = !videoTrack.enabled;
-    videoTrack.enabled = newState;
+    const track = localStream.getVideoTracks()[0];
+    if (!track) return;
+    const newState = !track.enabled;
+    track.enabled = newState;
     setVideoEnabled(newState);
-    videoEnabledRef.current = newState;
+    socket.emit("media-state-change", { audioEnabled, videoEnabled: newState });
+  }, [localStream, socket, audioEnabled]);
 
-    const audioTrack = localStream.getAudioTracks()[0];
-    const currentAudioState = audioTrack ? audioTrack.enabled : audioEnabledRef.current;
-
-    console.log(`[toggleVideo] video: ${newState ? 'ON' : 'OFF'}, audio: ${currentAudioState ? 'ON' : 'OFF'}, videoTrack.id=${videoTrack.id}`);
-    socket.emit("media-state-change", { 
-      audioEnabled: currentAudioState, 
-      videoEnabled: newState 
-    });
-  }, [localStream, socket]);
-
-  // Screen Share
-  const startScreenShare = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      const screenTrack = stream.getVideoTracks()[0];
-
-      replaceVideoTrackForAll(screenTrack);
-
-      setScreenStream(stream);
-      setScreenSharing(true);
-      socket.emit("screen-share-start");
-
-      screenTrack.onended = () => {
-        stopScreenShare();
-      };
-    } catch (err) {
-      console.error("Screen share failed:", err);
-    }
-  };
-
-  const stopScreenShare = () => {
-    if (!screenStream) return;
-    const cameraTrack = localStream.getVideoTracks()[0];
-    console.log('stopScreenShare: cameraTrack id=', cameraTrack.id, 'enabled=', cameraTrack.enabled);
-
-    replaceVideoTrackForAll(cameraTrack);
-
-    screenStream.getTracks().forEach(track => track.stop());
-    setScreenStream(null);
-    setScreenSharing(false);
-    socket.emit("screen-share-stop");
-  };
-
-  const toggleScreenShare = useCallback(() => {
-    if (screenSharing) stopScreenShare();
-    else startScreenShare();
-  }, [screenSharing]);
-
-  const leaveRoom = useCallback(() => {
-    socket.emit("leave-room", { roomCode: roomId });
-    peersRef.current.forEach(({ peer }) => peer.destroy());
-    peersRef.current = [];
-    setPeers([]);
-    if (localStream) localStream.getTracks().forEach((track) => track.stop());
-    if (screenStream) screenStream.getTracks().forEach((track) => track.stop());
-    socket.disconnect();
-  }, [socket, roomId, localStream, screenStream]);
-
+  // --- Đổi tên ---
   const changeName = useCallback((newName) => {
     setMyName(newName);
     socket.emit("change-name", newName);
   }, [socket]);
 
+  // --- Rời phòng ---
+  const leaveRoom = useCallback(() => {
+    peersRef.current.forEach(({ peer }) => {
+      if (peer && !peer.destroyed) peer.destroy();
+    });
+    peersRef.current = [];
+    setPeers([]);
+    if (localStream) localStream.getTracks().forEach((t) => t.stop());
+    socket.disconnect();
+  }, [localStream, socket]);
+
   return (
     <CallContext.Provider
       value={{
         peers,
-        localVideoRef,
         localStream,
-        screenStream,
         toggleAudio,
         toggleVideo,
-        toggleScreenShare,
         leaveRoom,
         audioEnabled,
         videoEnabled,
-        screenSharing,
         myName,
         changeName,
       }}
