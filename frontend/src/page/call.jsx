@@ -10,6 +10,7 @@ import {
   FaLink,
 } from "react-icons/fa";
 
+// Component hiển thị video/audio của một người tham gia
 function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameChange }) {
   const videoRef = useRef();
   const [editing, setEditing] = useState(false);
@@ -17,27 +18,33 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
   const [playFailed, setPlayFailed] = useState(false);
   const inputRef = useRef();
 
+  // Hàm thử phát video (khi trình duyệt chặn tự động phát)
   const attemptPlay = useCallback(() => {
     if (videoRef.current && stream) {
       videoRef.current.play()
-        .then(() => setPlayFailed(false))
+        .then(() => {
+          console.log(`✅ Video playing for ${name}`);
+          setPlayFailed(false);
+        })
         .catch((e) => {
-          console.warn("⚠️ play failed:", e);
+          console.warn(`⚠️ play failed for ${name}:`, e);
           setPlayFailed(true);
         });
     }
-  }, [stream]);
+  }, [stream, name]);
 
+  // Gán stream vào video element và thử phát
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      // Trên mobile, cần user gesture để play, nên thử ngay nhưng có thể bị chặn
       attemptPlay();
     } else {
       setPlayFailed(false);
     }
   }, [stream, attemptPlay]);
 
-  // Log stream info để debug
+  // Debug: log thông tin stream
   useEffect(() => {
     if (stream) {
       console.log(`📹 VideoTile stream for ${name}:`, stream.id,
@@ -45,8 +52,9 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
     }
   }, [stream, name]);
 
-  const showVideo = stream && videoEnabled;
+  const showVideo = stream && videoEnabled && stream.getVideoTracks().length > 0;
 
+  // Xử lý đổi tên (chỉ cho phép local)
   const handleNameClick = () => {
     if (isLocal) {
       setEditing(true);
@@ -66,8 +74,16 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
     if (e.key === "Escape") setEditing(false);
   };
 
+  // Khi người dùng click vào video (nếu play failed), thử phát lại
+  const handleVideoClick = () => {
+    if (playFailed) {
+      attemptPlay();
+    }
+  };
+
   return (
-    <div className="relative w-full h-full bg-gray-800 rounded-lg overflow-hidden">
+    <div className="relative w-full h-full bg-gray-800 rounded-lg overflow-hidden" onClick={handleVideoClick}>
+      {/* Video element */}
       <video
         ref={videoRef}
         autoPlay
@@ -76,16 +92,18 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
         className={`w-full h-full object-cover ${showVideo ? "" : "hidden"}`}
       />
 
+      {/* Placeholder khi không có video */}
       {!showVideo && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-700 text-white">
           <span className="text-lg font-semibold">{name || "Guest"}</span>
         </div>
       )}
 
+      {/* Nút bấm phát lại nếu bị chặn */}
       {playFailed && showVideo && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-30">
           <button
-            onClick={attemptPlay}
+            onClick={(e) => { e.stopPropagation(); attemptPlay(); }}
             className="bg-blue-600 text-white px-4 py-2 rounded-lg"
           >
             Bấm để phát video
@@ -93,6 +111,7 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
         </div>
       )}
 
+      {/* Tên người dùng (có thể click để đổi nếu là local) */}
       <div className="absolute bottom-2 left-2 bg-black/50 text-white px-2 py-1 rounded text-sm z-10">
         {editing ? (
           <input
@@ -111,6 +130,7 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
         )}
       </div>
 
+      {/* Biểu tượng trạng thái mic/camera */}
       <div className="absolute top-2 right-2 flex gap-1 bg-black/50 p-1 rounded z-10">
         {audioEnabled ? (
           <FaMicrophone className="text-white" size={14} />
@@ -127,6 +147,7 @@ function VideoTile({ stream, name, isLocal, audioEnabled, videoEnabled, onNameCh
   );
 }
 
+// Giao diện chính của cuộc gọi
 function CallUI() {
   const navigate = useNavigate();
   const {
@@ -142,10 +163,10 @@ function CallUI() {
   } = useCall();
 
   const [copySuccess, setCopySuccess] = useState(false);
+  const [cols, setCols] = useState(6);  // Số cột grid (responsive)
+  const [rows, setRows] = useState(4);  // Số hàng grid
 
-  const [cols, setCols] = useState(6);
-  const [rows, setRows] = useState(4);
-
+  // Điều chỉnh grid theo kích thước màn hình
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth < 768) {
@@ -161,6 +182,7 @@ function CallUI() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  // Copy link phòng vào clipboard
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).then(() => {
       setCopySuccess(true);
@@ -168,6 +190,7 @@ function CallUI() {
     });
   };
 
+  // Danh sách nguồn video (local + các peer)
   const videoSources = [
     {
       type: "local",
@@ -180,7 +203,7 @@ function CallUI() {
     ...peers.map((p) => ({
       type: "peer",
       id: p.id,
-      stream: p.peer?.remoteStream,
+      stream: p.stream,
       name: p.name || "Guest",
       audioEnabled: p.audioEnabled,
       videoEnabled: p.videoEnabled,
@@ -189,6 +212,7 @@ function CallUI() {
 
   return (
     <div className="fixed inset-0 bg-gray-900">
+      {/* Nút copy link */}
       <div className="absolute top-4 right-4 z-50 flex items-center gap-2">
         {copySuccess && (
           <span className="text-green-400 bg-black/50 px-2 py-1 rounded text-sm">
@@ -204,6 +228,7 @@ function CallUI() {
         </button>
       </div>
 
+      {/* Grid hiển thị video */}
       <div className="h-full p-4 pt-16">
         <div
           className="grid gap-4 h-full"
@@ -213,16 +238,19 @@ function CallUI() {
           }}
         >
           {videoSources.map((src) => {
+            // Xác định vị trí ô grid
             let row, col;
             if (src.type === "local") {
+              // Local luôn ở góc dưới bên trái
               row = rows;
               col = 1;
             } else {
+              // Các peer xếp lần lượt vào các ô còn lại
               const index = videoSources.filter((s) => s.type !== "local").findIndex((s) => s.id === src.id);
               const availableCells = [];
               for (let r = 1; r <= rows; r++) {
                 for (let c = 1; c <= cols; c++) {
-                  if (r === rows && c === 1) continue;
+                  if (r === rows && c === 1) continue; // bỏ qua ô local
                   availableCells.push({ row: r, col: c });
                 }
               }
@@ -231,7 +259,7 @@ function CallUI() {
                 row = cell.row;
                 col = cell.col;
               } else {
-                return null;
+                return null; // không đủ ô (có thể scroll)
               }
             }
 
@@ -249,6 +277,7 @@ function CallUI() {
                   videoEnabled={src.videoEnabled}
                   onNameChange={changeName}
                 />
+                {/* Nút điều khiển cho local */}
                 {src.type === "local" && (
                   <div className="absolute top-2 right-2 flex gap-2 z-20">
                     <button
@@ -290,6 +319,7 @@ function CallUI() {
   );
 }
 
+// Component chính, bọc CallProvider
 export default function Call() {
   const [searchParams] = useSearchParams();
   const roomId = searchParams.get("roomId");

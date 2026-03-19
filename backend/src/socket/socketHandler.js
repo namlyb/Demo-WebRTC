@@ -1,20 +1,31 @@
 import RandomNameService from "../services/RandomName.js";
 import Room from "../models/Room.js";
+import { getOrCreateRouter, getRoomData, rooms } from "../services/mediasoup.js";
 
-// Lưu trữ các timer cho từng phòng
-const roomTimers = new Map(); // key: roomCode, value: { endTimer, expireTimer }
+// Lấy địa chỉ IP sẽ được thông báo cho client (cấu hình trong .env)
+const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '192.168.1.5';
+
+// Danh sách ICE servers - chỉ dùng STUN công cộng (Google) cho mạng LAN
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' }
+];
+
+const roomTimers = new Map();
 
 export default function socketHandler(io) {
   io.on("connection", (socket) => {
-    console.log("User connected", socket.id);
+    console.log("🔌 User connected", socket.id);
 
-    // Khởi tạo trạng thái media mặc định
     socket.data.audioEnabled = true;
     socket.data.videoEnabled = true;
     socket.data.screenSharing = false;
 
+    // --- JOIN ROOM ---
     socket.on("join-room", async ({ roomCode }) => {
-      // Thử tăng participants, nếu thất bại (phòng đầy hoặc không active) thì từ chối
       const newCount = await Room.incrementParticipants(roomCode);
       if (newCount === 0) {
         socket.emit("error", "Cannot join room: full or inactive");
@@ -23,16 +34,13 @@ export default function socketHandler(io) {
       }
 
       const name = RandomNameService.generate();
-
       socket.data.roomCode = roomCode;
       socket.data.name = name;
-
       socket.join(roomCode);
 
       socket.emit("your-name", name);
 
       const clients = [...(io.sockets.adapter.rooms.get(roomCode) || [])];
-
       const users = clients
         .filter(id => id !== socket.id)
         .map(id => {
@@ -43,10 +51,8 @@ export default function socketHandler(io) {
             screenSharing: s?.data?.screenSharing || false
           };
         });
-
       socket.emit("all-users", users);
 
-      // Gửi trạng thái media hiện tại của tất cả user trong phòng cho người mới
       const mediaStates = clients
         .filter(id => id !== socket.id)
         .map(id => {
@@ -65,36 +71,229 @@ export default function socketHandler(io) {
         screenSharing: socket.data.screenSharing
       });
 
-      // Nếu phòng đang có timer chờ đóng thì hủy timer
+      // Huỷ timer nếu có
       const timers = roomTimers.get(roomCode);
       if (timers) {
         clearTimeout(timers.endTimer);
         clearTimeout(timers.expireTimer);
         roomTimers.delete(roomCode);
-        console.log(`Room ${roomCode}: cancelled expiration timers (user joined)`);
+        console.log(`⏱️ Room ${roomCode}: cancelled expiration timers (user joined)`);
+      }
+
+      // --- Gửi thông tin mediasoup router và danh sách producer hiện có ---
+      try {
+        const router = await getOrCreateRouter(roomCode);
+        socket.emit("router-rtp-capabilities", router.rtpCapabilities);
+
+        const roomData = getRoomData(roomCode);
+        if (roomData) {
+          const existingProducers = [];
+          for (const [producerId, entry] of roomData.producers) {
+            if (entry.socketId !== socket.id) {
+              existingProducers.push({
+                producerId,
+                kind: entry.kind,
+                peerId: entry.socketId,
+                appData: entry.appData,
+              });
+            }
+          }
+          if (existingProducers.length > 0) {
+            socket.emit("existing-producers", existingProducers);
+          }
+        }
+      } catch (err) {
+        console.error("❌ Error creating router:", err);
+        socket.emit("error", "Failed to initialize media router");
       }
     });
 
-    socket.on("sending-signal", ({ userToSignal, signal }) => {
-      io.to(userToSignal).emit("receiving-signal", {
-        id: socket.id,
-        signal
-      });
+    // --- Tạo WebRTC transport (sửa listenIps) ---
+    socket.on("create-transport", async ({ direction }, callback) => {
+      const roomCode = socket.data.roomCode;
+      if (!roomCode) return callback({ error: "Not in a room" });
+
+      try {
+        const router = await getOrCreateRouter(roomCode);
+        let transport;
+
+        // 👇 Thêm nhiều listenIps: localhost và IP LAN
+        const listenIps = [
+          { ip: '127.0.0.1', announcedIp: '127.0.0.1' },
+          { ip: ANNOUNCED_IP, announcedIp: ANNOUNCED_IP }
+        ];
+
+        if (direction === 'send') {
+          transport = await router.createWebRtcTransport({
+            listenIps,
+            enableUdp: true,
+            enableTcp: true,
+            preferUdp: true,
+          });
+          socket.data.sendTransport = transport;
+        } else {
+          transport = await router.createWebRtcTransport({
+            listenIps,
+            enableUdp: true,
+            enableTcp: true,
+            preferUdp: true,
+          });
+          socket.data.recvTransport = transport;
+        }
+
+        console.log(`🚀 Created ${direction} transport for room ${roomCode}`);
+        console.log(`   Transport ID: ${transport.id}`);
+        console.log(`   Announced IPs: ${listenIps.map(ip => ip.announcedIp).join(', ')}`);
+
+        transport.on('icecandidate', (candidate) => {
+          if (candidate) {
+            console.log(`   Server ICE candidate: ${candidate.candidate}`);
+          }
+        });
+
+        transport.on('dtlsstatechange', (dtlsState) => {
+          console.log(`🔐 ${direction} transport DTLS state: ${dtlsState}`);
+          if (dtlsState === 'closed') transport.close();
+        });
+
+        callback({
+          id: transport.id,
+          iceParameters: transport.iceParameters,
+          iceCandidates: transport.iceCandidates,
+          dtlsParameters: transport.dtlsParameters,
+          iceServers: ICE_SERVERS,   // 👈 gửi danh sách STUN
+        });
+      } catch (err) {
+        console.error("❌ Error creating transport:", err);
+        callback({ error: err.message });
+      }
     });
 
-    socket.on("returning-signal", ({ userToSignal, signal }) => {
-      io.to(userToSignal).emit("receiving-signal", {
-        id: socket.id,
-        signal
-      });
+    // --- Kết nối transport ---
+    socket.on("connect-transport", async ({ transportId, dtlsParameters, direction }, callback) => {
+      const roomCode = socket.data.roomCode;
+      if (!roomCode) return callback({ error: "Not in a room" });
+
+      try {
+        const router = await getOrCreateRouter(roomCode);
+        const transport = direction === 'send' ? socket.data.sendTransport : socket.data.recvTransport;
+        if (!transport || transport.id !== transportId) {
+          return callback({ error: "Transport not found" });
+        }
+
+        await transport.connect({ dtlsParameters });
+        console.log(`✅ ${direction} transport connected successfully`);
+        callback({});
+      } catch (err) {
+        console.error(`❌ Error connecting ${direction} transport:`, err);
+        callback({ error: err.message });
+      }
     });
 
+    // --- Producer ---
+    socket.on("produce", async ({ kind, rtpParameters, appData }, callback) => {
+      const roomCode = socket.data.roomCode;
+      if (!roomCode) return callback({ error: "Not in a room" });
+
+      try {
+        const transport = socket.data.sendTransport;
+        if (!transport) return callback({ error: "Send transport not created" });
+
+        const producer = await transport.produce({ kind, rtpParameters, appData });
+        const roomData = getRoomData(roomCode);
+        if (!roomData) return callback({ error: "Room data not found" });
+        roomData.producers.set(producer.id, { producer, socketId: socket.id, kind, appData });
+
+        console.log(`📤 Producer created: ${producer.id} (${kind}) by socket ${socket.id}`);
+
+        socket.to(roomCode).emit("new-producer", {
+          producerId: producer.id,
+          kind,
+          peerId: socket.id,
+          appData,
+        });
+
+        callback({ id: producer.id });
+      } catch (err) {
+        console.error("❌ Error producing:", err);
+        callback({ error: err.message });
+      }
+    });
+
+    // --- Consumer ---
+    socket.on("consume", async ({ producerId, rtpCapabilities }, callback) => {
+      const roomCode = socket.data.roomCode;
+      if (!roomCode) return callback({ error: "Not in a room" });
+
+      try {
+        const roomData = getRoomData(roomCode);
+        if (!roomData) return callback({ error: "Room data not found" });
+
+        const producerEntry = roomData.producers.get(producerId);
+        if (!producerEntry) return callback({ error: "Producer not found" });
+
+        const producer = producerEntry.producer;
+        const router = roomData.router;
+
+        if (!router.canConsume({ producerId, rtpCapabilities })) {
+          return callback({ error: "Cannot consume this producer" });
+        }
+
+        const transport = socket.data.recvTransport;
+        if (!transport) return callback({ error: "Receive transport not created" });
+
+        const consumer = await transport.consume({
+          producerId,
+          rtpCapabilities,
+          paused: false,
+        });
+
+        roomData.consumers.set(consumer.id, { consumer, socketId: socket.id, producerId });
+
+        console.log(`📥 Consumer created: ${consumer.id} for producer ${producerId} by socket ${socket.id}`);
+
+        consumer.on('transportclose', () => {
+          roomData.consumers.delete(consumer.id);
+          console.log(`🚫 Consumer ${consumer.id} closed due to transport close`);
+        });
+
+        callback({
+          id: consumer.id,
+          producerId,
+          kind: consumer.kind,
+          rtpParameters: consumer.rtpParameters,
+        });
+      } catch (err) {
+        console.error("❌ Error consuming:", err);
+        callback({ error: err.message });
+      }
+    });
+
+    // --- Resume consumer ---
+    socket.on("resume-consumer", async ({ consumerId }, callback) => {
+      const roomCode = socket.data.roomCode;
+      if (!roomCode) return callback({ error: "Not in a room" });
+
+      try {
+        const roomData = getRoomData(roomCode);
+        if (!roomData) return callback({ error: "Room data not found" });
+
+        const consumerEntry = roomData.consumers.get(consumerId);
+        if (!consumerEntry) return callback({ error: "Consumer not found" });
+
+        await consumerEntry.consumer.resume();
+        console.log(`▶️ Consumer ${consumerId} resumed`);
+        callback({});
+      } catch (err) {
+        console.error("❌ Error resuming consumer:", err);
+        callback({ error: err.message });
+      }
+    });
+
+    // --- Media state change ---
     socket.on("media-state-change", (data) => {
-      // Cập nhật trạng thái trên server
       socket.data.audioEnabled = data.audioEnabled;
       socket.data.videoEnabled = data.videoEnabled;
-
-      // Broadcast cho người khác trong phòng (không gửi lại cho chính mình)
       socket.to(socket.data.roomCode).emit("peer-media-state", {
         userId: socket.id,
         ...data
@@ -109,7 +308,6 @@ export default function socketHandler(io) {
       });
     });
 
-    // Screen share events
     socket.on("screen-share-start", () => {
       socket.data.screenSharing = true;
       socket.to(socket.data.roomCode).emit("peer-screen-share-start", socket.id);
@@ -120,55 +318,68 @@ export default function socketHandler(io) {
       socket.to(socket.data.roomCode).emit("peer-screen-share-stop", socket.id);
     });
 
+    // --- Disconnect ---
     socket.on("disconnect", async () => {
       const roomCode = socket.data.roomCode;
       if (!roomCode) return;
 
+      console.log(`🔌 User disconnected: ${socket.id} from room ${roomCode}`);
       socket.to(roomCode).emit("user-left", socket.id);
 
-      // Giảm số người tham gia và lấy số mới
-      const newCount = await Room.decrementParticipants(roomCode);
-      console.log(`Room ${roomCode} participants left: ${newCount}`);
+      const roomData = getRoomData(roomCode);
+      if (roomData) {
+        for (const [producerId, entry] of roomData.producers) {
+          if (entry.socketId === socket.id) {
+            entry.producer.close();
+            roomData.producers.delete(producerId);
+            socket.to(roomCode).emit("producer-closed", { producerId });
+            console.log(`🗑️ Producer ${producerId} closed`);
+          }
+        }
+        for (const [consumerId, entry] of roomData.consumers) {
+          if (entry.socketId === socket.id) {
+            entry.consumer.close();
+            roomData.consumers.delete(consumerId);
+            console.log(`🗑️ Consumer ${consumerId} closed`);
+          }
+        }
+      }
 
-      // Nếu không còn ai trong phòng, lên lịch đóng phòng
+      const newCount = await Room.decrementParticipants(roomCode);
       if (newCount === 0) {
-        // Kiểm tra xem đã có timer cho phòng này chưa (tránh trùng lặp)
         if (roomTimers.has(roomCode)) {
           const old = roomTimers.get(roomCode);
           clearTimeout(old.endTimer);
           clearTimeout(old.expireTimer);
         }
-
-        // Timer 1: sau 10 giây chuyển sang ENDED
         const endTimer = setTimeout(async () => {
           try {
             const affected = await Room.endRoom(roomCode);
             if (affected > 0) {
-              console.log(`Room ${roomCode} ended after inactivity`);
-
-              // Timer 2: sau 10 giây nữa chuyển sang EXPIRED
+              console.log(`⏱️ Room ${roomCode} ended after inactivity`);
+              const roomData = getRoomData(roomCode);
+              if (roomData) {
+                roomData.router.close();
+                rooms.delete(roomCode);
+              }
               const expireTimer = setTimeout(async () => {
                 const expired = await Room.expireRoom(roomCode);
                 if (expired > 0) {
-                  console.log(`Room ${roomCode} expired`);
+                  console.log(`⏱️ Room ${roomCode} expired`);
                 }
                 roomTimers.delete(roomCode);
               }, 10000);
-
-              // Lưu timer expire vào map
               const timers = roomTimers.get(roomCode) || {};
               timers.expireTimer = expireTimer;
               roomTimers.set(roomCode, timers);
             } else {
-              // Phòng có thể đã được kết thúc trước đó (do API), xóa khỏi map
               roomTimers.delete(roomCode);
             }
           } catch (err) {
-            console.error(`Error ending room ${roomCode}:`, err);
+            console.error(`❌ Error ending room ${roomCode}:`, err);
             roomTimers.delete(roomCode);
           }
         }, 10000);
-
         roomTimers.set(roomCode, { endTimer });
       }
     });
