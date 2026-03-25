@@ -27,9 +27,11 @@ export const CallProvider = ({ children, roomId }) => {
 
   // --- Helper log ICE events với chi tiết hơn ---
   const addTransportLogging = (transport, name) => {
+    console.log(`🔹 ${name} initial iceCandidates:`, transport.iceCandidates);
     transport.on('icecandidate', (candidate) => {
       if (candidate) {
         console.log(`🔹 ${name} ICE candidate:`, candidate.candidate);
+        // In chi tiết candidate
         if (candidate.candidate) {
           const parts = candidate.candidate.split(' ');
           const type = parts[7];
@@ -38,6 +40,13 @@ export const CallProvider = ({ children, roomId }) => {
           const port = parts[5];
           console.log(`   ➡️ type: ${type}, protocol: ${protocol}, ip: ${ip}, port: ${port}`);
         }
+        // Gửi candidate về server
+        const direction = name === 'Send' ? 'send' : 'recv';
+        socket.emit('ice-candidate', {
+          transportId: transport.id,
+          candidate,
+          direction
+        });
       } else {
         console.log(`🔹 ${name} ICE gathering complete`);
       }
@@ -271,7 +280,10 @@ export const CallProvider = ({ children, roomId }) => {
           const sendTransport = device.createSendTransport(transportParams);
           sendTransportRef.current = sendTransport;
           console.log('Send transport created with id:', sendTransport.id);
-          console.log('ICE servers for send transport:', sendTransport.iceServers);
+          console.log('Send transport initial iceCandidates:', sendTransport.iceCandidates);
+
+          // Gắn logging (sẽ gửi ICE candidate lên server)
+          addTransportLogging(sendTransport, 'Send');
 
           sendTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
             console.log("🔌 Send transport connect event");
@@ -300,8 +312,6 @@ export const CallProvider = ({ children, roomId }) => {
               }
             });
           });
-
-          addTransportLogging(sendTransport, 'Send');
 
           // Tạo audio producer ngay lập tức
           if (localStream) {
@@ -334,7 +344,9 @@ export const CallProvider = ({ children, roomId }) => {
           const recvTransport = device.createRecvTransport(recvParams);
           recvTransportRef.current = recvTransport;
           console.log('Recv transport created with id:', recvTransport.id);
-          console.log('ICE servers for recv transport:', recvTransport.iceServers);
+          console.log('Recv transport initial iceCandidates:', recvTransport.iceCandidates);
+
+          addTransportLogging(recvTransport, 'Recv');
 
           recvTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
             console.log("🔌 Recv transport connect event");
@@ -352,8 +364,6 @@ export const CallProvider = ({ children, roomId }) => {
               }
             });
           });
-
-          addTransportLogging(recvTransport, 'Recv');
 
           // Sau khi receive transport sẵn sàng, xử lý các producer đang chờ
           if (pendingProducersRef.current.length > 0) {
@@ -468,6 +478,15 @@ export const CallProvider = ({ children, roomId }) => {
       setMyName(name);
     });
 
+    // ---- Nhận ICE candidate từ server và thêm vào transport ----
+    socket.on("ice-candidate", ({ transportId, candidate, direction }) => {
+      console.log(`📡 Received ICE candidate from server for ${direction} transport:`, candidate);
+      const transport = direction === 'send' ? sendTransportRef.current : recvTransportRef.current;
+      if (transport && transport.id === transportId) {
+        transport.addIceCandidate(candidate).catch(e => console.warn('Add ICE candidate failed', e));
+      }
+    });
+
     return () => {
       socket.off("user-joined");
       socket.off("user-left");
@@ -479,6 +498,7 @@ export const CallProvider = ({ children, roomId }) => {
       socket.off("all-users");
       socket.off("initial-media-states");
       socket.off("your-name");
+      socket.off("ice-candidate");
     };
   }, [socket, consumeProducer, removeTrackFromPeer]);
 

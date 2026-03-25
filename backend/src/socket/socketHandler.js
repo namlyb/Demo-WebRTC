@@ -3,15 +3,11 @@ import Room from "../models/Room.js";
 import { getOrCreateRouter, getRoomData, rooms } from "../services/mediasoup.js";
 
 // Lấy địa chỉ IP sẽ được thông báo cho client (cấu hình trong .env)
-const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '192.168.1.5';
+const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '10.122.146.60';
 
-// Danh sách ICE servers - chỉ dùng STUN công cộng (Google) cho mạng LAN
+// Danh sách ICE servers - chỉ STUN để kiểm tra host candidate
 const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' }
+  { urls: 'stun:stun.l.google.com:19302' }
 ];
 
 const roomTimers = new Map();
@@ -108,7 +104,7 @@ export default function socketHandler(io) {
       }
     });
 
-    // --- Tạo WebRTC transport (sửa listenIps) ---
+    // --- Tạo WebRTC transport ---
     socket.on("create-transport", async ({ direction }, callback) => {
       const roomCode = socket.data.roomCode;
       if (!roomCode) return callback({ error: "Not in a room" });
@@ -117,7 +113,6 @@ export default function socketHandler(io) {
         const router = await getOrCreateRouter(roomCode);
         let transport;
 
-        // 👇 Thêm nhiều listenIps: localhost và IP LAN
         const listenIps = [
           { ip: '127.0.0.1', announcedIp: '127.0.0.1' },
           { ip: ANNOUNCED_IP, announcedIp: ANNOUNCED_IP }
@@ -144,10 +139,19 @@ export default function socketHandler(io) {
         console.log(`🚀 Created ${direction} transport for room ${roomCode}`);
         console.log(`   Transport ID: ${transport.id}`);
         console.log(`   Announced IPs: ${listenIps.map(ip => ip.announcedIp).join(', ')}`);
+        console.log(`   Initial ICE candidates:`, transport.iceCandidates);
 
+        // Gửi ICE candidate từ server đến client
         transport.on('icecandidate', (candidate) => {
           if (candidate) {
-            console.log(`   Server ICE candidate: ${candidate.candidate}`);
+            console.log(`   Server ICE candidate (${direction}): ${candidate.candidate}`);
+            socket.emit('ice-candidate', {
+              transportId: transport.id,
+              candidate,
+              direction
+            });
+          } else {
+            console.log(`   Server ICE gathering complete (${direction})`);
           }
         });
 
@@ -161,7 +165,7 @@ export default function socketHandler(io) {
           iceParameters: transport.iceParameters,
           iceCandidates: transport.iceCandidates,
           dtlsParameters: transport.dtlsParameters,
-          iceServers: ICE_SERVERS,   // 👈 gửi danh sách STUN
+          iceServers: ICE_SERVERS,
         });
       } catch (err) {
         console.error("❌ Error creating transport:", err);
@@ -175,7 +179,6 @@ export default function socketHandler(io) {
       if (!roomCode) return callback({ error: "Not in a room" });
 
       try {
-        const router = await getOrCreateRouter(roomCode);
         const transport = direction === 'send' ? socket.data.sendTransport : socket.data.recvTransport;
         if (!transport || transport.id !== transportId) {
           return callback({ error: "Transport not found" });
@@ -187,6 +190,21 @@ export default function socketHandler(io) {
       } catch (err) {
         console.error(`❌ Error connecting ${direction} transport:`, err);
         callback({ error: err.message });
+      }
+    });
+
+    // --- Nhận ICE candidate từ client và thêm vào transport ---
+    socket.on("ice-candidate", async ({ transportId, candidate, direction }) => {
+      const transport = direction === 'send' ? socket.data.sendTransport : socket.data.recvTransport;
+      if (transport && transport.id === transportId) {
+        try {
+          await transport.addIceCandidate(candidate);
+          console.log(`✅ Added client ICE candidate to ${direction} transport`);
+        } catch (err) {
+          console.warn(`⚠️ Failed to add ICE candidate: ${err.message}`);
+        }
+      } else {
+        console.warn(`⚠️ Transport not found for candidate (${direction}, id=${transportId})`);
       }
     });
 
