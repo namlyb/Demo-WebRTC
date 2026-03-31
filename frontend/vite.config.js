@@ -25,16 +25,16 @@ export default defineConfig({
     include: ['simple-peer', 'buffer', 'process', 'mediasoup-client']
   },
   server: {
-    proxy: {
-      '/api': {
-        target: 'https://10.122.146.60:5000',   // 👈 đổi sang https
-        secure: false,                           // bỏ qua kiểm tra SSL tự ký
-      },
-      '/socket.io': {
-        target: 'https://10.122.146.60:5000',
-        ws: true,
-        secure: false,
-      }
+  proxy: {
+    '/api': {
+      target: 'https://10.79.180.60:5000',
+      secure: false,
+    },
+    '/socket.io': {
+      target: 'https://10.79.180.60:5000',
+      ws: true,
+      secure: false,
     }
   }
+}
 });

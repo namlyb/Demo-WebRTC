@@ -1,16 +1,39 @@
 import RandomNameService from "../services/RandomName.js";
 import Room from "../models/Room.js";
 import { getOrCreateRouter, getRoomData, rooms } from "../services/mediasoup.js";
+import { getIceServers } from "../services/xirsys.js";
 
-// Lấy địa chỉ IP sẽ được thông báo cho client (cấu hình trong .env)
 const ANNOUNCED_IP = process.env.ANNOUNCED_IP || '10.122.146.60';
 
-// Danh sách ICE servers - chỉ STUN để kiểm tra host candidate
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' }
-];
+// Global ICE servers (STUN/TURN) sẽ được load khi server start
+let globalIceServers = null;
 
 const roomTimers = new Map();
+
+/**
+ * Khởi tạo ICE servers (gọi khi server start)
+ */
+export async function initIceServers() {
+  try {
+    const iceServers = await getIceServers();
+    if (iceServers && iceServers.length) {
+      globalIceServers = iceServers;
+      console.log('✅ ICE servers initialized from Xirsys');
+    } else {
+      throw new Error('No ICE servers from Xirsys');
+    }
+  } catch (err) {
+    console.warn('⚠️ Xirsys failed, using fallback ICE servers');
+    globalIceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ];
+  }
+}
 
 export default function socketHandler(io) {
   io.on("connection", (socket) => {
@@ -113,9 +136,9 @@ export default function socketHandler(io) {
         const router = await getOrCreateRouter(roomCode);
         let transport;
 
+        // Chỉ dùng 0.0.0.0 với announcedIp là IP LAN
         const listenIps = [
-          { ip: '127.0.0.1', announcedIp: '127.0.0.1' },
-          { ip: ANNOUNCED_IP, announcedIp: ANNOUNCED_IP }
+          { ip: '0.0.0.0', announcedIp: ANNOUNCED_IP }
         ];
 
         if (direction === 'send') {
@@ -141,17 +164,22 @@ export default function socketHandler(io) {
         console.log(`   Announced IPs: ${listenIps.map(ip => ip.announcedIp).join(', ')}`);
         console.log(`   Initial ICE candidates:`, transport.iceCandidates);
 
-        // Gửi ICE candidate từ server đến client
+        // ========== SỬA: Gửi tất cả ICE candidate, chỉ lọc loopback & link-local ==========
         transport.on('icecandidate', (candidate) => {
-          if (candidate) {
-            console.log(`   Server ICE candidate (${direction}): ${candidate.candidate}`);
-            socket.emit('ice-candidate', {
-              transportId: transport.id,
-              candidate,
-              direction
-            });
-          } else {
-            console.log(`   Server ICE gathering complete (${direction})`);
+          if (candidate && candidate.candidate) {
+            // Bỏ qua candidate localhost (127.0.0.1, ::1) và link-local IPv6 (fe80::)
+            const isLoopback = candidate.candidate.includes('127.0.0.1') || candidate.candidate.includes('::1');
+            const isLinkLocalIPv6 = candidate.candidate.includes('fe80::');
+            if (!isLoopback && !isLinkLocalIPv6) {
+              console.log(`   Server ICE candidate (${direction}): ${candidate.candidate}`);
+              socket.emit('ice-candidate', {
+                transportId: transport.id,
+                candidate,
+                direction
+              });
+            } else {
+              console.log(`   Ignored loopback/link-local ICE candidate: ${candidate.candidate}`);
+            }
           }
         });
 
@@ -165,7 +193,7 @@ export default function socketHandler(io) {
           iceParameters: transport.iceParameters,
           iceCandidates: transport.iceCandidates,
           dtlsParameters: transport.dtlsParameters,
-          iceServers: ICE_SERVERS,
+          iceServers: globalIceServers || [{ urls: 'stun:stun.l.google.com:19302' }],
         });
       } catch (err) {
         console.error("❌ Error creating transport:", err);
@@ -252,10 +280,6 @@ export default function socketHandler(io) {
 
         const producer = producerEntry.producer;
         const router = roomData.router;
-
-        if (!router.canConsume({ producerId, rtpCapabilities })) {
-          return callback({ error: "Cannot consume this producer" });
-        }
 
         const transport = socket.data.recvTransport;
         if (!transport) return callback({ error: "Receive transport not created" });

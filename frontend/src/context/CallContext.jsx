@@ -25,7 +25,7 @@ export const CallProvider = ({ children, roomId }) => {
   const consumersMapRef = useRef(new Map());
   const pendingProducersRef = useRef([]);
 
-  // --- Helper log ICE events với chi tiết hơn ---
+  // Helper log ICE events
   const addTransportLogging = (transport, name) => {
     console.log(`🔹 ${name} initial iceCandidates:`, transport.iceCandidates);
     transport.on('icecandidate', (candidate) => {
@@ -76,28 +76,34 @@ export const CallProvider = ({ children, roomId }) => {
     });
   };
 
-  // --- Khởi tạo socket ---
+  // Khởi tạo socket
   useEffect(() => {
     const s = io({ transports: ["websocket"] });
     setSocket(s);
     return () => s.disconnect();
   }, []);
 
-  // --- Lấy local media ---
+  // Lấy local media
   useEffect(() => {
     const initLocalStream = async () => {
       try {
-        if (!window.isSecureContext) {
-          console.error('❌ Not a secure context (HTTPS required)');
+        const hostname = window.location.hostname;
+        const isLocalIp = hostname === 'localhost' || hostname === '127.0.0.1' ||
+                          hostname.startsWith('192.168.') || hostname.startsWith('10.') ||
+                          /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
+
+        if (!window.isSecureContext && !isLocalIp) {
+          console.error('❌ Not a secure context and not local IP');
           alert('Trang web không được truy cập qua HTTPS. Vui lòng dùng HTTPS.');
           return;
+        } else if (!window.isSecureContext && isLocalIp) {
+          console.log('🔓 Allowing insecure context for local IP');
         }
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           console.error('❌ navigator.mediaDevices not supported', navigator.mediaDevices);
           const isHttps = window.location.protocol === 'https:';
-          const isLocalhost = ['localhost', '127.0.0.1', ''].includes(window.location.hostname);
-          if (!isHttps && !isLocalhost) {
+          if (!isHttps && !isLocalIp) {
             alert('Truy cập bằng HTTP từ xa không được phép. Hãy dùng HTTPS.');
           } else {
             alert('Trình duyệt không hỗ trợ camera/microphone. Hãy dùng Chrome hoặc Firefox mới nhất.');
@@ -112,7 +118,7 @@ export const CallProvider = ({ children, roomId }) => {
         console.log('✅ Local stream obtained', stream.id, 
           stream.getTracks().map(t => `${t.kind}:${t.enabled}`));
         const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack) videoTrack.enabled = false; // tắt video mặc định
+        if (videoTrack) videoTrack.enabled = false;
         setLocalStream(stream);
       } catch (err) {
         console.error('❌ getUserMedia error', err.name, err.message);
@@ -130,7 +136,7 @@ export const CallProvider = ({ children, roomId }) => {
     initLocalStream();
   }, []);
 
-  // --- Join room khi sẵn sàng ---
+  // Join room khi sẵn sàng
   useEffect(() => {
     if (!socket || !roomId || !localStream) return;
     const joinRoom = () => socket.emit("join-room", { roomCode: roomId });
@@ -139,17 +145,17 @@ export const CallProvider = ({ children, roomId }) => {
     return () => socket.off("connect", joinRoom);
   }, [socket, roomId, localStream]);
 
-  // --- Helper: thêm track vào peer stream ---
+  // Helper: thêm track vào peer stream
   const addTrackToPeer = useCallback((peerId, track, kind) => {
     setPeers(prev => {
       let peer = prev.find(p => p.id === peerId);
       if (!peer) {
-        peer = { 
-          id: peerId, 
-          name: 'Unknown', 
-          stream: new MediaStream(), 
-          audioEnabled: true, 
-          videoEnabled: true 
+        peer = {
+          id: peerId,
+          name: 'Unknown',
+          stream: new MediaStream(),
+          audioEnabled: true,
+          videoEnabled: true
         };
         peer.stream.addTrack(track);
         console.log(`➕ New peer ${peerId} created with ${kind} track`);
@@ -170,7 +176,7 @@ export const CallProvider = ({ children, roomId }) => {
     });
   }, []);
 
-  // --- Helper: xoá track khỏi peer stream ---
+  // Helper: xoá track khỏi peer stream
   const removeTrackFromPeer = useCallback((peerId, kind) => {
     setPeers(prev => {
       const peer = prev.find(p => p.id === peerId);
@@ -186,7 +192,7 @@ export const CallProvider = ({ children, roomId }) => {
     });
   }, []);
 
-  // --- Hàm consume một producer ---
+  // Hàm consume một producer
   const consumeProducer = useCallback(async (producerId, kind, peerId, appData) => {
     if (!deviceRef.current || !recvTransportRef.current) {
       console.warn("⏳ Receive transport not ready yet, cannot consume, pushing to pending");
@@ -228,7 +234,7 @@ export const CallProvider = ({ children, roomId }) => {
     });
   }, [socket, addTrackToPeer]);
 
-  // --- Hàm tạo video producer ---
+  // Hàm tạo video producer
   const createVideoProducer = useCallback(async () => {
     if (!localStream) {
       console.log('⏸️ Cannot create video producer: localStream not ready');
@@ -258,7 +264,7 @@ export const CallProvider = ({ children, roomId }) => {
     }
   }, [localStream]);
 
-  // --- Xử lý router capabilities và thiết lập mediasoup ---
+  // Xử lý router capabilities và thiết lập mediasoup
   useEffect(() => {
     if (!socket || !roomId) return;
 
@@ -282,7 +288,6 @@ export const CallProvider = ({ children, roomId }) => {
           console.log('Send transport created with id:', sendTransport.id);
           console.log('Send transport initial iceCandidates:', sendTransport.iceCandidates);
 
-          // Gắn logging (sẽ gửi ICE candidate lên server)
           addTransportLogging(sendTransport, 'Send');
 
           sendTransport.on("connect", ({ dtlsParameters }, callback, errback) => {
@@ -327,7 +332,6 @@ export const CallProvider = ({ children, roomId }) => {
               console.log('✅ Audio producer created');
             }
 
-            // Nếu videoEnabled = true, tự động tạo video producer ngay
             if (videoEnabled && !producersRef.current.video) {
               await createVideoProducer();
             }
@@ -386,7 +390,7 @@ export const CallProvider = ({ children, roomId }) => {
     };
   }, [socket, roomId, localStream, videoEnabled, consumeProducer, createVideoProducer]);
 
-  // --- Lắng nghe các sự kiện từ server ---
+  // Lắng nghe các sự kiện từ server
   useEffect(() => {
     if (!socket) return;
 
@@ -478,8 +482,9 @@ export const CallProvider = ({ children, roomId }) => {
       setMyName(name);
     });
 
-    // ---- Nhận ICE candidate từ server và thêm vào transport ----
+    // ========== SỬA: Nhận ICE candidate từ server và thêm vào transport (bỏ lọc IP cứng) ==========
     socket.on("ice-candidate", ({ transportId, candidate, direction }) => {
+      // Không kiểm tra IP nữa, nhận tất cả candidate từ server
       console.log(`📡 Received ICE candidate from server for ${direction} transport:`, candidate);
       const transport = direction === 'send' ? sendTransportRef.current : recvTransportRef.current;
       if (transport && transport.id === transportId) {
@@ -502,7 +507,7 @@ export const CallProvider = ({ children, roomId }) => {
     };
   }, [socket, consumeProducer, removeTrackFromPeer]);
 
-  // --- Toggle audio ---
+  // Toggle audio
   const toggleAudio = useCallback(() => {
     if (!localStream) return;
     const track = localStream.getAudioTracks()[0];
@@ -517,7 +522,7 @@ export const CallProvider = ({ children, roomId }) => {
     }
   }, [localStream, socket, videoEnabled]);
 
-  // --- Toggle video ---
+  // Toggle video
   const toggleVideo = useCallback(async () => {
     console.log('🎥 toggleVideo called, current enabled:', videoEnabled);
     if (!localStream) {
@@ -537,7 +542,6 @@ export const CallProvider = ({ children, roomId }) => {
     console.log('🔍 existing video producer?', !!producersRef.current.video);
 
     if (producersRef.current.video) {
-      // Đã có producer, chỉ pause/resume
       if (newState) {
         await producersRef.current.video.resume();
         console.log('▶️ Video producer resumed');
@@ -546,7 +550,6 @@ export const CallProvider = ({ children, roomId }) => {
         console.log('⏸️ Video producer paused');
       }
     } else {
-      // Chưa có producer, cần tạo mới nếu video được bật
       if (newState) {
         if (!sendTransportRef.current) {
           console.log('⏸️ sendTransport not ready, cannot create video producer');
@@ -564,13 +567,13 @@ export const CallProvider = ({ children, roomId }) => {
     }
   }, [localStream, socket, audioEnabled, videoEnabled]);
 
-  // --- Đổi tên ---
+  // Đổi tên
   const changeName = useCallback((newName) => {
     setMyName(newName);
     socket.emit("change-name", newName);
   }, [socket]);
 
-  // --- Rời phòng và dọn dẹp ---
+  // Rời phòng và dọn dẹp
   const leaveRoom = useCallback(() => {
     if (producersRef.current.audio) producersRef.current.audio.close();
     if (producersRef.current.video) producersRef.current.video.close();
